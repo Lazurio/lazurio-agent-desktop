@@ -170,6 +170,7 @@ fn pairs_and_serves_mcp_over_real_openssh() {
     )
     .unwrap();
     assert_eq!(first["server"], "fake-engine");
+    assert_eq!(first["tools"], 2);
     assert_eq!(first["c1_ok"], true);
     assert_eq!(first["c2_error"], true);
 
@@ -213,4 +214,42 @@ fn refuses_a_host_with_another_key() {
     assert_eq!(lines(&out), 0);
     manager.shutdown();
     assert!(no_key_files(&dir));
+}
+
+/// The real Agent Desktop engine over real OpenSSH, when `LAD_ENGINE` is set
+/// (`scripts/build-engine.sh` or a local build of the fork).
+#[test]
+fn real_engine_over_real_openssh() {
+    let Some(engine) = common::real_engine() else {
+        eprintln!("skipping: LAD_ENGINE is not set");
+        return;
+    };
+    if !available() {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("data");
+    let sshd = start_sshd(tmp.path());
+    let out = tmp.path().join("attach.jsonl");
+    let lp = launchpad(&sshd, tmp.path(), &out, sshd.host_public.clone());
+    let (manager, _) = common::open_with_engine(&dir, PathBuf::from(SSH), vec![], engine);
+    let view = common::pair(&manager, &lp.origin);
+    assert!(
+        wait(60, || lines(&out) >= 1),
+        "no MCP session with the real engine: {:?}",
+        manager.environments()[0].status
+    );
+    let first: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(first["server"], "agent-desktop", "{first}");
+    assert!(first["tools"].as_u64().unwrap() > 10, "{first}");
+    manager.set_enabled(&view.id, false).unwrap();
+    assert!(wait(10, || state_of(&manager, &view.id) == State::Off));
+    manager.shutdown();
 }

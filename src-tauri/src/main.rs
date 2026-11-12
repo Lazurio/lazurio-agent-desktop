@@ -109,14 +109,16 @@ struct View {
 #[tauri::command]
 fn state(app: AppHandle) -> View {
     let st = app.state::<AppState>();
+    let onboarded = st.settings.lock().unwrap().onboarded;
+    let pairing = st.pending.lock().unwrap().is_some() || st.cancel.lock().unwrap().is_some();
     View {
         environments: st.manager.environments(),
         os: platform::os_name(),
         computer_name: platform::computer_name(),
         version: env!("CARGO_PKG_VERSION"),
         autostart: app.autolaunch().is_enabled().unwrap_or(false),
-        onboarded: st.settings.lock().unwrap().onboarded,
-        pairing: st.pending.lock().unwrap().is_some() || st.cancel.lock().unwrap().is_some(),
+        onboarded,
+        pairing,
         permissions: permissions::status(),
     }
 }
@@ -184,7 +186,8 @@ async fn wait_pairing(app: AppHandle) -> CmdResult<EnvironmentView> {
 fn cancel_pairing(app: AppHandle) {
     let st = app.state::<AppState>();
     st.pending.lock().unwrap().take();
-    if let Some(c) = st.cancel.lock().unwrap().take() {
+    let cancel = st.cancel.lock().unwrap().take();
+    if let Some(c) = cancel {
         c.store(true, Ordering::SeqCst);
     }
 }

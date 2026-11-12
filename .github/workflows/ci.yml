@@ -27,8 +27,8 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, sshd: "1" }
-          - { os: macos-15, target: aarch64-apple-darwin, sshd: "0" }
-          - { os: macos-15-intel, target: x86_64-apple-darwin, sshd: "0" }
+          - { os: macos-15, target: aarch64-apple-darwin, sshd: "1" }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, sshd: "1" }
           - { os: windows-2025, target: x86_64-pc-windows-msvc, sshd: "0" }
     steps:
       - uses: actions/checkout@v4
@@ -39,12 +39,12 @@ jobs:
         with:
           key: core-${{ matrix.target }}
       - name: Format
-        if: matrix.sshd == '1'
+        if: runner.os == 'Linux'
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --locked -p lazurio-agent-desktop-core -p lazurio-agent-desktop-testkit --all-targets -- -D warnings
       - name: OpenSSH server for the end-to-end test
-        if: matrix.sshd == '1'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q openssh-server

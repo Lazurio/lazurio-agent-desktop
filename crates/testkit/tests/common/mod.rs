@@ -26,12 +26,31 @@ pub fn open(
     ssh_program: PathBuf,
     extra: Vec<String>,
 ) -> (Arc<Manager>, Arc<MemoryStore>) {
+    open_with_engine(data_dir, ssh_program, extra, fake_engine())
+}
+
+/// The real Agent Desktop engine when `LAD_ENGINE` points at its binary.
+pub fn real_engine() -> Option<EngineSpec> {
+    let program = PathBuf::from(std::env::var_os("LAD_ENGINE")?);
+    Some(EngineSpec {
+        program,
+        args: vec!["mcp".into()],
+        env: vec![],
+    })
+}
+
+pub fn open_with_engine(
+    data_dir: &Path,
+    ssh_program: PathBuf,
+    extra: Vec<String>,
+    engine: EngineSpec,
+) -> (Arc<Manager>, Arc<MemoryStore>) {
     let store = Arc::new(MemoryStore::default());
     let manager = Manager::open(
         ManagerConfig {
             data_dir: data_dir.to_path_buf(),
             ssh_program,
-            engine: fake_engine(),
+            engine,
             computer_name: "Test computer".into(),
             os: "macos".into(),
             extra_ssh_options: extra,
