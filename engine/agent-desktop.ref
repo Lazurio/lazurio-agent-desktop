@@ -1,4 +1,4 @@
 # The Agent Desktop engine bundled as a sidecar: fork Lazurio/agent-desktop at a pinned commit.
 # Change it deliberately; CI and releases build exactly this commit.
 repository=https://github.com/Lazurio/agent-desktop.git
-commit=5fc6d2589af364a790877c3c648153c58a72ef70
+commit=934a9c5750ab79160978701306ca49db78b83c98
