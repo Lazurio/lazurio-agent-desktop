@@ -1,11 +1,16 @@
 name: Release
 
-# A tag v<version> builds, signs and publishes a GitHub Release. Installed apps
-# update from latest.json of the newest release that is not a pre-release
-# (https://github.com/<repo>/releases/latest/download/latest.json), so a tag with
-# a pre-release part (v0.2.0-rc.1) is published as a pre-release and never
-# reaches them. Apple and Windows code signing switch on with their secrets;
-# the updater signing key is required.
+# A tag v<version> builds, signs and publishes a GitHub Release.
+#
+# - Stable (v0.2.0): the latest release. Apps on the stable channel update
+#   from https://github.com/<repo>/releases/latest/download/latest.json.
+# - Pilot (v0.2.0-pilot.N): a pre-release that is never "latest". Its
+#   latest.json is also uploaded to the rolling pre-release `pilot`, which apps
+#   on the pilot channel read: .../releases/download/pilot/latest.json.
+# - Any other pre-release (v0.2.0-rc.1): a pre-release that no channel reads.
+#
+# The updater signing key is required. Apple and Windows code signing switch
+# on with their secrets; until then pilot builds are unsigned (internal pilot).
 on:
   push:
     tags: ["v*"]
@@ -24,6 +29,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       prerelease: ${{ steps.v.outputs.prerelease }}
+      pilot: ${{ steps.v.outputs.pilot }}
     steps:
       - uses: actions/checkout@v4
       - id: v
@@ -37,8 +43,10 @@ jobs:
             exit 1
           fi
           case "$version" in *-*) pre=true ;; *) pre=false ;; esac
+          case "$version" in *-pilot.*) pilot=true ;; *) pilot=false ;; esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "prerelease=$pre" >> "$GITHUB_OUTPUT"
+          echo "pilot=$pilot" >> "$GITHUB_OUTPUT"
       - name: latest.json builder self-test
         run: python3 -I scripts/latest_json.py --self-test
 
@@ -77,3 +85,17 @@ jobs:
             --title "Lazurio Agent Desktop $VERSION" \
             --notes "Lazurio Agent Desktop $VERSION. Installed apps update themselves from this release." \
             "${flags[@]}"
+      - name: Point the pilot channel at this release
+        if: needs.version.outputs.pilot == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view pilot >/dev/null 2>&1; then
+            gh release create pilot \
+              --target "$GITHUB_SHA" \
+              --prerelease --latest=false \
+              --title "Lazurio Agent Desktop: pilot channel" \
+              --notes "Rolling pre-release for the pilot update channel. Its latest.json points at the newest pilot release; the packages live in that release. Not for manual download."
+          fi
+          gh release upload pilot release/latest.json --clobber
+          gh release view pilot --json assets --jq '.assets[].name'

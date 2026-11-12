@@ -128,8 +128,15 @@ jobs:
             extra=(--config src-tauri/tauri.noupdater.conf.json)
             echo "::warning::No updater signing key: building without update packages."
           fi
+          bundles="${{ matrix.bundles }}"
+          version=$(sed -n 's/^ *"version": *"\(.*\)",$/\1/p' src-tauri/tauri.conf.json | head -1)
+          if [ "$RUNNER_OS" = "Windows" ] && [[ "$version" == *-* ]]; then
+            # WiX (MSI) only takes numeric pre-release parts; pre-releases ship the NSIS installer.
+            bundles=nsis
+          fi
+          echo "version $version, bundles $bundles"
           for attempt in 1 2 3; do
-            npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} ${TAURI_SIGNING_ARGS:-} "${extra[@]}" && exit 0
+            npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" build --ci --target ${{ matrix.target }} --bundles "$bundles" ${TAURI_SIGNING_ARGS:-} "${extra[@]}" && exit 0
             echo "::warning::bundling attempt $attempt failed"
             sleep 15
           done

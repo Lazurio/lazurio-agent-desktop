@@ -51,7 +51,8 @@ Prostředí přes Tailscale a Admin vaší Organizace ho musí mít schválený.
 
 Aplikace se spouští po přihlášení do systému; vypnete to v panelu.
 
-**Aktualizace** se dějí samy: aplikace se na novou verzi podívá po spuštění
+**Kanál aktualizací** (stabilní nebo pilotní) změníte v panelu u položky
+Aktualizace. **Aktualizace** se dějí samy: aplikace se na novou verzi podívá po spuštění
 a pak každé 4 hodiny a nainstaluje ji ve chvíli, kdy na počítači zrovna
 nepracuje agent. Potom se restartuje a znovu připojí. Když chcete hned, v panelu
 se ukáže „Je k dispozici verze …“ s tlačítkem **Aktualizovat**. Aktualizaci
@@ -166,7 +167,17 @@ Set the new version in `src-tauri/tauri.conf.json` and `Cargo.toml`
 (`[workspace.package]`), merge, then push the tag `v<version>`. The release
 workflow builds all three targets, signs the update packages, writes
 `latest.json` and publishes the GitHub Release. A tag with a pre-release part
-(`v0.2.0-rc.1`) becomes a pre-release, which installed apps never see.
+(`v0.2.0-rc.1`) becomes a pre-release, which the stable channel never sees.
+
+**Pilot channel.** A tag `v<version>-pilot.<n>` (for example
+`v0.1.0-pilot.2`) becomes a pre-release too, and its `latest.json` is also
+uploaded to the rolling pre-release `pilot`. Apps on the pilot channel read
+`releases/download/pilot/latest.json`; pilot builds start on that channel, and
+anyone can switch channels in the panel. `0.1.0-pilot.N` sorts below `0.1.0`,
+and the pilot channel also takes a newer stable release, so pilot installs move
+on to stable by themselves. Pilot releases ship the NSIS installer on Windows
+(MSI does not take a non-numeric pre-release) and may be unsigned by Apple and
+Microsoft for a controlled internal pilot.
 
 ### Signing
 

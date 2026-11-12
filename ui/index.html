@@ -80,6 +80,17 @@
     <button id="update-button" class="primary" data-i18n="updateButton"></button>
   </div>
 
+  <div class="settings-row">
+    <label for="channel" data-i18n="channelLabel"></label>
+    <select id="channel">
+      <option value="stable" data-i18n="channelStable"></option>
+      <option value="pilot" data-i18n="channelPilot"></option>
+    </select>
+    <span class="spacer"></span>
+    <button class="help-toggle" data-help="help-channel" aria-expanded="false" data-i18n-title="helpButton">?</button>
+  </div>
+  <p id="help-channel" class="help" hidden data-i18n="helpChannel"></p>
+
   <footer>
     <label class="check"><input id="autostart" type="checkbox"> <span data-i18n="autostart"></span></label>
     <span class="spacer"></span>

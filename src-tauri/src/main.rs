@@ -52,6 +52,9 @@ struct Settings {
     onboarded: bool,
     #[serde(default)]
     autostart_set: bool,
+    /// The owner's update channel; none means the build's default.
+    #[serde(default)]
+    update_channel: Option<updates::Channel>,
 }
 
 struct AppState {
@@ -271,6 +274,19 @@ fn finish_onboarding(app: AppHandle) {
 #[tauri::command]
 async fn install_update(app: AppHandle) -> CmdResult<()> {
     updates::install(app).await.map_err(other)
+}
+
+/// The panel's channel choice: stable or pilot.
+#[tauri::command]
+async fn set_update_channel(app: AppHandle, channel: String) -> CmdResult<()> {
+    let channel = updates::Channel::parse(&channel).ok_or_else(|| other("unknown channel"))?;
+    {
+        let st = app.state::<AppState>();
+        st.settings.lock().unwrap().update_channel = Some(channel);
+        st.save_settings();
+    }
+    let _ = updates::check(&app).await;
+    Ok(())
 }
 
 #[tauri::command]
@@ -518,7 +534,8 @@ fn main() {
             finish_onboarding,
             quit,
             install_update,
-            check_update
+            check_update,
+            set_update_channel
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the app")

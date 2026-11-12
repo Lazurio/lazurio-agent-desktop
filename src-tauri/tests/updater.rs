@@ -102,8 +102,12 @@ impl Server {
 }
 
 fn updater(trusted: &Key, server: &Server) -> tauri_plugin_updater::Updater {
+    updater_at("0.1.0", trusted, server)
+}
+
+fn updater_at(current: &str, trusted: &Key, server: &Server) -> tauri_plugin_updater::Updater {
     let mut context = tauri::test::mock_context(tauri::test::noop_assets());
-    context.package_info_mut().version = "0.1.0".parse().unwrap();
+    context.package_info_mut().version = current.parse().unwrap();
     context.config_mut().plugins.0.insert(
         "updater".into(),
         json!({
@@ -190,4 +194,20 @@ fn ignores_an_older_or_equal_release() {
     assert!(check(&updater).is_none());
     server.publish("0.1.0", &trusted.sign(PACKAGE, "0.1.0"));
     assert!(check(&updater).is_none());
+}
+
+#[test]
+fn pilot_versions_update_to_the_next_pilot_and_then_to_stable() {
+    let trusted = Key::new();
+    let server = Server::start();
+    let pilot1 = updater_at("0.1.0-pilot.1", &trusted, &server);
+    server.publish("0.1.0-pilot.2", &trusted.sign(PACKAGE, "0.1.0-pilot.2"));
+    let update = check(&pilot1).expect("pilot.2 is newer than pilot.1");
+    assert_eq!(download(&update).unwrap(), PACKAGE);
+    // The stable release of the same version is newer than every pilot of it.
+    server.publish("0.1.0", &trusted.sign(PACKAGE, "0.1.0"));
+    assert!(check(&pilot1).is_some());
+    let pilot2 = updater_at("0.1.0-pilot.2", &trusted, &server);
+    server.publish("0.1.0-pilot.1", &trusted.sign(PACKAGE, "0.1.0-pilot.1"));
+    assert!(check(&pilot2).is_none());
 }

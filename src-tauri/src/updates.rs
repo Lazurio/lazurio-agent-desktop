@@ -22,7 +22,54 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
-pub const CHANNEL: &str = "stable (GitHub Releases, Lazurio/lazurio-agent-desktop)";
+/// The newest release that is not a pre-release.
+const STABLE_URL: &str =
+    "https://github.com/Lazurio/lazurio-agent-desktop/releases/latest/download/latest.json";
+/// The rolling pre-release `pilot`, whose latest.json points at the newest pilot release.
+const PILOT_URL: &str =
+    "https://github.com/Lazurio/lazurio-agent-desktop/releases/download/pilot/latest.json";
+
+/// Where updates come from. `stable` is the default; a pilot build
+/// (`x.y.z-pilot.N`) starts on `pilot`. The pilot channel also takes a stable
+/// release once it is newer, so a pilot install moves on to stable by itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Channel {
+    Stable,
+    Pilot,
+}
+
+impl Channel {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "stable" => Some(Channel::Stable),
+            "pilot" => Some(Channel::Pilot),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Channel::Stable => "stable",
+            Channel::Pilot => "pilot",
+        }
+    }
+
+    pub fn default_for(version: &str) -> Self {
+        if version.contains("-pilot") {
+            Channel::Pilot
+        } else {
+            Channel::Stable
+        }
+    }
+}
+
+/// The channel this app uses: the owner's choice, else the build's default.
+pub fn channel(app: &AppHandle) -> Channel {
+    let st = app.state::<AppState>();
+    let chosen = st.settings.lock().unwrap().update_channel;
+    chosen.unwrap_or_else(|| Channel::default_for(&app.package_info().version.to_string()))
+}
 const FIRST_CHECK_AFTER: Duration = Duration::from_secs(60);
 const CHECK_EVERY: Duration = Duration::from_secs(4 * 60 * 60);
 /// While an agent works, a found update waits and is retried this often.
@@ -33,6 +80,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 #[serde(rename_all = "camelCase")]
 pub struct UpdateInfo {
     pub current: String,
+    pub channel: String,
     pub available: Option<String>,
     pub notes: Option<String>,
     pub installing: bool,
@@ -50,6 +98,7 @@ impl Updates {
     pub fn info(&self, app: &AppHandle) -> UpdateInfo {
         let mut info = self.info.lock().unwrap().clone();
         info.current = app.package_info().version.to_string();
+        info.channel = channel(app).as_str().to_string();
         info
     }
 }
@@ -65,17 +114,30 @@ fn updates(app: &AppHandle) -> &Updates {
     &app.state::<AppState>().inner().updates
 }
 
-/// Asks GitHub Releases for a newer version and remembers the answer.
+async fn check_endpoint(app: &AppHandle, url: &str) -> Result<Option<Update>, String> {
+    let url = tauri::Url::parse(url).map_err(|e| e.to_string())?;
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .timeout(CHECK_TIMEOUT)
+        .build()
+        .map_err(|e| e.to_string())?;
+    updater.check().await.map_err(|e| e.to_string())
+}
+
+/// Asks GitHub Releases for a newer version on this app's channel and
+/// remembers the answer.
 pub async fn check(app: &AppHandle) -> Result<Option<String>, String> {
-    let result = async {
-        let updater = app
-            .updater_builder()
-            .timeout(CHECK_TIMEOUT)
-            .build()
-            .map_err(|e| e.to_string())?;
-        updater.check().await.map_err(|e| e.to_string())
-    }
-    .await;
+    let result = match channel(app) {
+        Channel::Stable => check_endpoint(app, STABLE_URL).await,
+        // A newer stable release wins; until there is one (GitHub answers 404
+        // without any stable release), the pilot channel decides.
+        Channel::Pilot => match check_endpoint(app, STABLE_URL).await {
+            Ok(Some(update)) => Ok(Some(update)),
+            _ => check_endpoint(app, PILOT_URL).await,
+        },
+    };
     let st = updates(app);
     let mut info = st.info.lock().unwrap();
     info.last_check_ms = Some(now_ms());
@@ -197,7 +259,11 @@ impl AgentTools {
             "version": self.app.package_info().version.to_string(),
             "os": platform::os_name(),
             "osVersion": platform::os_version(),
-            "channel": CHANNEL,
+            "channel": channel(&self.app).as_str(),
+            "channelSource": match channel(&self.app) {
+                Channel::Stable => STABLE_URL,
+                Channel::Pilot => PILOT_URL,
+            },
             "updateAvailable": available,
             "checkError": error,
         })
@@ -270,7 +336,7 @@ impl AppTools for AgentTools {
             "appVersion": self.app.package_info().version.to_string(),
             "os": platform::os_name(),
             "osVersion": platform::os_version(),
-            "updateChannel": "stable",
+            "updateChannel": channel(&self.app).as_str(),
         })
     }
 }

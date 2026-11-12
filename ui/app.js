@@ -152,6 +152,8 @@ async function renderHistory() {
 
 function renderUpdate() {
   const u = view.update;
+  const select = document.getElementById("channel");
+  if (document.activeElement !== select) select.value = u.channel;
   const box = document.getElementById("update");
   const button = document.getElementById("update-button");
   let text = "";
@@ -170,7 +172,7 @@ function renderPairing() {
 
 async function refresh() {
   view = await invoke("state");
-  document.getElementById("version").textContent = `v${view.version}`;
+  document.getElementById("version").textContent = `v${view.version} · ${t(view.update.channel === "pilot" ? "channelPilot" : "channelStable")}`;
   document.getElementById("autostart").checked = view.autostart;
   document.getElementById("computer-name").textContent = t("addAs", { name: view.computerName });
   renderEnvironments();
@@ -210,6 +212,10 @@ document.getElementById("add-form").addEventListener("submit", async (e) => {
 document.getElementById("update-button").addEventListener("click", async (e) => {
   e.target.disabled = true;
   try { await invoke("install_update"); } catch (err) { /* shown from state */ } finally { e.target.disabled = false; refresh(); }
+});
+document.getElementById("channel").addEventListener("change", async (e) => {
+  e.target.disabled = true;
+  try { await invoke("set_update_channel", { channel: e.target.value }); } finally { e.target.disabled = false; refresh(); }
 });
 document.getElementById("pairing-cancel").addEventListener("click", () => invoke("cancel_pairing"));
 document.getElementById("perm-recheck").addEventListener("click", refresh);
