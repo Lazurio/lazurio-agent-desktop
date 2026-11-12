@@ -120,6 +120,7 @@ fn launchpad(sshd: &Sshd, dir: &Path, out: &Path, known_hosts: String) -> FakeLa
         port: sshd.port,
         known_hosts,
         decline: false,
+        environment_name: None,
         on_approve: Some(Box::new(move |q, device| {
             // The line Launchpad writes (contract v0 with the absolute path of
             // `lazurio`; here the forced command is the fake attach).

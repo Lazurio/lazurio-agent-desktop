@@ -25,6 +25,8 @@ pub struct ManagerConfig {
     pub os: String,
     /// Extra `ssh -o` options, for tests only.
     pub extra_ssh_options: Vec<String>,
+    /// The app's own tools (status, update) served next to the engine's.
+    pub app_tools: Option<crate::app_tools::AppToolsHandle>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -139,6 +141,7 @@ impl Manager {
             run_dir: self.cfg.data_dir.join("run"),
             engine: self.cfg.engine.clone(),
             extra_ssh_options: self.cfg.extra_ssh_options.clone(),
+            app_tools: self.cfg.app_tools.clone(),
         };
         Supervisor::spawn(cfg, key, self.history.clone(), listener, rec.enabled)
     }
@@ -212,7 +215,10 @@ impl Manager {
         self.keystore.set(&account(&id), &key.seed())?;
         let rec = EnvironmentRecord {
             id: id.clone(),
-            label: launchpad::label(&origin),
+            label: result
+                .environment_name
+                .clone()
+                .unwrap_or_else(|| launchpad::label(&origin)),
             launchpad: origin.clone(),
             device_id: result.device_id,
             ssh: result.ssh,

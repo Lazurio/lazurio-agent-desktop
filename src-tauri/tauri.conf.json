@@ -53,6 +53,19 @@
       "nsis": {
         "installMode": "currentUser"
       }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMzOEQzMkJEOEE4QTM3OTQKUldTVU40cUt2VEtOTTlRVnNKamRJdXVYSTZ1cnJENGNmWnYzMUhXdkpKZ21WcXdicEVocDQvK2sK",
+      "endpoints": [
+        "https://github.com/Lazurio/lazurio-agent-desktop/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      },
+      "requireSignedVersion": true
     }
   }
 }

@@ -8,6 +8,7 @@
 //! Nothing here depends on a user interface, so the same code can later run as a
 //! helper process of Lazurio App.
 
+pub mod app_tools;
 pub mod channel;
 pub mod error;
 pub mod history;

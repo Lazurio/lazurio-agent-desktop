@@ -45,6 +45,9 @@ fn default_port() -> u16 {
 pub struct PairingResult {
     pub device_id: String,
     pub ssh: SshTarget,
+    /// The Environment's name as Lazurio shows it (`environment.name`), when
+    /// Launchpad sends it. Not part of contract v0; proposed for it.
+    pub environment_name: Option<String>,
 }
 
 pub struct PairingSession {
@@ -197,6 +200,14 @@ struct RawResult {
     #[serde(rename = "deviceId")]
     device_id: String,
     ssh: RawSsh,
+    #[serde(default)]
+    environment: Option<RawEnvironment>,
+}
+
+#[derive(Deserialize)]
+struct RawEnvironment {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -255,7 +266,28 @@ pub fn parse_result(encoded: &str) -> Result<PairingResult> {
             port: raw.ssh.port,
             known_hosts,
         },
+        environment_name: raw
+            .environment
+            .and_then(|e| e.name)
+            .and_then(|n| display_name(&n)),
     })
+}
+
+/// A name fit for the panel: control and format characters removed, spaces
+/// collapsed, at most 64 characters (the same rule Launchpad uses for names).
+pub fn display_name(raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control() && !is_format_char(*c))
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let name: String = collapsed.chars().take(64).collect();
+    let name = name.trim().to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+fn is_format_char(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}')
 }
 
 fn valid_device_id(s: &str) -> bool {
@@ -350,10 +382,26 @@ mod tests {
         .unwrap();
         assert_eq!(r.device_id, "office-mac");
         assert_eq!(r.ssh.port, 22);
+        assert_eq!(r.environment_name, None);
         assert_eq!(
             r.ssh.known_hosts,
             vec!["env.tailnet.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB"]
         );
+    }
+
+    #[test]
+    fn takes_the_environment_name_when_launchpad_sends_it() {
+        let r = parse_result(&enc(
+            r#"{"deviceId":"office-mac","environment":{"name":"  Pracovní\u0007  Prostředí\u200b "},"ssh":{"host":"h","user":"u","knownHosts":"ssh-ed25519 AAAA"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(r.environment_name.as_deref(), Some("Pracovní Prostředí"));
+        let blank = parse_result(&enc(
+            r#"{"deviceId":"x","environment":{"name":" "},"ssh":{"host":"h","user":"u","knownHosts":"ssh-ed25519 AAAA"}}"#,
+        ))
+        .unwrap();
+        assert_eq!(blank.environment_name, None);
+        assert_eq!(display_name(&"x".repeat(100)).unwrap().len(), 64);
     }
 
     #[test]

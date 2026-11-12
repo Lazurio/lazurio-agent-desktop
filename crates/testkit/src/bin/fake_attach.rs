@@ -74,6 +74,24 @@ fn main() {
     let ping = wait_for("p1");
     send(json!({"jsonrpc": "2.0", "id": "l1", "method": "tools/list", "params": {}}));
     let list = wait_for("l1");
+    let tool_names: Vec<String> = list["result"]["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| t["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let app_status = if tool_names.iter().any(|n| n == "lazurio_app_status") {
+        send(
+            json!({"jsonrpc": "2.0", "id": "s1", "method": "tools/call", "params": {
+            "name": "lazurio_app_status", "arguments": {}}}),
+        );
+        wait_for("s1")["result"]["content"][0]["text"].clone()
+    } else {
+        Value::Null
+    };
     send(
         json!({"jsonrpc": "2.0", "id": "c1", "method": "tools/call", "params": {
         "name": "desktop_fake_tool", "arguments": {"app": "Fake App", "text": "do-not-log-this"}}}),
@@ -88,6 +106,8 @@ fn main() {
     let summary = json!({
         "server": init["result"]["serverInfo"]["name"],
         "ping": ping["result"].is_object(),
+        "app_status": app_status,
+        "app_meta": init["result"]["_meta"]["io.lazurio/agent-desktop"],
         "tools": list["result"]["tools"].as_array().map_or(0, Vec::len),
         "c1_ok": c1["result"]["isError"] == false,
         "c2_error": c2["result"]["isError"] == true,

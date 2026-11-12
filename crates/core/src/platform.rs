@@ -15,6 +15,11 @@ pub fn os_name() -> &'static str {
     }
 }
 
+/// The system's version, for example `15.1.0` on macOS or `10.0.26100` on Windows.
+pub fn os_version() -> String {
+    os_info::get().version().to_string()
+}
+
 /// The system OpenSSH client the contract names.
 pub fn default_ssh_program() -> PathBuf {
     #[cfg(target_os = "windows")]
@@ -28,20 +33,44 @@ pub fn default_ssh_program() -> PathBuf {
     }
 }
 
-/// The name people know the computer by: the macOS computer name, else the host name.
+/// The name people know the computer by, as the system shows it: on macOS
+/// the Computer Name from Sharing settings (for example "MacBook Pro"), on
+/// Windows the device name. Never the user's login name.
 pub fn computer_name() -> String {
     #[cfg(target_os = "macos")]
-    if let Ok(out) = Command::new("/usr/sbin/scutil")
-        .args(["--get", "ComputerName"])
-        .output()
-    {
-        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if out.status.success() && !name.is_empty() {
-            return name;
-        }
+    if let Some(name) = macos::computer_name() {
+        return name;
     }
     let host = gethostname::gethostname().to_string_lossy().to_string();
-    host.strip_suffix(".local").unwrap_or(&host).to_string()
+    let host = host.strip_suffix(".local").unwrap_or(&host).to_string();
+    if host.is_empty() {
+        "Computer".to_string()
+    } else {
+        host
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::{CFString, CFStringRef};
+    use std::ffi::c_void;
+
+    #[link(name = "SystemConfiguration", kind = "framework")]
+    extern "C" {
+        fn SCDynamicStoreCopyComputerName(store: *const c_void, encoding: *mut u32) -> CFStringRef;
+    }
+
+    pub(super) fn computer_name() -> Option<String> {
+        // SAFETY: a null store asks SystemConfiguration for a temporary
+        // session; the returned string follows the Create rule.
+        let raw = unsafe { SCDynamicStoreCopyComputerName(std::ptr::null(), std::ptr::null_mut()) };
+        if raw.is_null() {
+            return None;
+        }
+        let name = unsafe { CFString::wrap_under_create_rule(raw) }.to_string();
+        crate::pairing::display_name(&name)
+    }
 }
 
 /// Child processes of the app never open a console window on Windows.

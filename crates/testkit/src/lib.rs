@@ -27,6 +27,8 @@ pub struct Approval {
     pub known_hosts: String,
     /// Pressing Cancel on the page: the callback gets `error=cancelled`.
     pub decline: bool,
+    /// Sent as `environment.name` when set (proposed addition to contract v0).
+    pub environment_name: Option<String>,
     /// Called with the query and the device id before redirecting.
     pub on_approve: Option<Hook>,
 }
@@ -95,7 +97,7 @@ fn serve(mut stream: TcpStream, approval: &Approval, reqs: &Mutex<Vec<Query>>) {
         if let Some(hook) = &approval.on_approve {
             hook(&q, &approval.device_id);
         }
-        let result = json!({
+        let mut result = json!({
             "deviceId": approval.device_id,
             "ssh": {
                 "host": approval.host,
@@ -104,6 +106,9 @@ fn serve(mut stream: TcpStream, approval: &Approval, reqs: &Mutex<Vec<Query>>) {
                 "knownHosts": approval.known_hosts,
             }
         });
+        if let Some(name) = &approval.environment_name {
+            result["environment"] = json!({ "name": name });
+        }
         location
             .query_pairs_mut()
             .append_pair("state", &state)

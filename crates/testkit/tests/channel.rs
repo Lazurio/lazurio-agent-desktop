@@ -18,6 +18,7 @@ fn launchpad() -> FakeLaunchpad {
             "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
                 .into(),
         decline: false,
+        environment_name: None,
         on_approve: None,
     })
 }
@@ -142,5 +143,42 @@ fn reports_why_it_cannot_connect() {
         .history(100)
         .iter()
         .any(|e| e.event == Event::Connected));
+    manager.shutdown();
+}
+
+#[test]
+fn serves_the_app_tools_next_to_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("attach.jsonl");
+    let lp = launchpad();
+    let (manager, _) = common::open_full(
+        dir.path(),
+        common::fake_attach(),
+        vec![format!("LadOut={}", out.display()), "LadHoldMs=200".into()],
+        common::fake_engine(),
+        common::app_tools(),
+    );
+    common::pair(&manager, &lp.origin);
+    assert!(wait(20, || lines(&out) >= 1));
+    let first: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&out)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    // Engine tools plus the app's own, one answered by the app, not the engine.
+    assert_eq!(first["tools"], 3);
+    assert_eq!(first["app_status"], "fake-app-status 9.9.9");
+    assert_eq!(first["app_meta"]["appVersion"], "9.9.9");
+    assert_eq!(first["server"], "fake-engine");
+    assert_eq!(first["c1_ok"], true);
+    assert!(wait(10, || manager
+        .history(100)
+        .iter()
+        .any(|e| e.event == Event::Tool
+            && e.tool.as_deref() == Some("lazurio_app_status")
+            && e.ok == Some(true))));
     manager.shutdown();
 }

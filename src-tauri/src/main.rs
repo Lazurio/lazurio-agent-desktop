@@ -6,7 +6,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod permissions;
+mod updates;
 
+use lazurio_agent_desktop_core::app_tools::AppToolsHandle;
 use lazurio_agent_desktop_core::channel::{EngineSpec, State};
 use lazurio_agent_desktop_core::history::HistoryEntry;
 use lazurio_agent_desktop_core::keystore;
@@ -58,6 +60,7 @@ struct AppState {
     cancel: Mutex<Option<Arc<AtomicBool>>>,
     settings: Mutex<Settings>,
     settings_path: PathBuf,
+    updates: updates::Updates,
 }
 
 impl AppState {
@@ -104,6 +107,7 @@ struct View {
     onboarded: bool,
     pairing: bool,
     permissions: permissions::Status,
+    update: updates::UpdateInfo,
 }
 
 #[tauri::command]
@@ -120,6 +124,7 @@ fn state(app: AppHandle) -> View {
         onboarded,
         pairing,
         permissions: permissions::status(),
+        update: st.updates.info(&app),
     }
 }
 
@@ -260,6 +265,17 @@ fn finish_onboarding(app: AppHandle) {
     let st = app.state::<AppState>();
     st.settings.lock().unwrap().onboarded = true;
     st.save_settings();
+}
+
+/// The panel's Update button: install the announced version now.
+#[tauri::command]
+async fn install_update(app: AppHandle) -> CmdResult<()> {
+    updates::install(app).await.map_err(other)
+}
+
+#[tauri::command]
+async fn check_update(app: AppHandle) -> CmdResult<Option<String>> {
+    updates::check(&app).await.map_err(other)
 }
 
 #[tauri::command]
@@ -415,6 +431,8 @@ fn main() {
             show_panel(app)
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec![STARTED_AT_LOGIN]),
@@ -434,6 +452,9 @@ fn main() {
                     computer_name: platform::computer_name(),
                     os: platform::os_name().into(),
                     extra_ssh_options: Vec::new(),
+                    app_tools: Some(AppToolsHandle(Arc::new(updates::AgentTools {
+                        app: app.handle().clone(),
+                    }))),
                 },
                 Arc::from(keystore::system_store(data_dir.join("keys"))),
                 Arc::new(move || {
@@ -454,6 +475,7 @@ fn main() {
                 cancel: Mutex::new(None),
                 settings: Mutex::new(settings),
                 settings_path,
+                updates: updates::Updates::default(),
             });
             let st = app.state::<AppState>();
             if first_start {
@@ -463,6 +485,7 @@ fn main() {
                 st.save_settings();
             }
 
+            updates::spawn_background(app.handle().clone());
             build_tray(app.handle())?;
             update_tray(app.handle());
 
@@ -493,7 +516,9 @@ fn main() {
             request_permission,
             set_autostart,
             finish_onboarding,
-            quit
+            quit,
+            install_update,
+            check_update
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the app")

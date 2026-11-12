@@ -41,17 +41,13 @@ pub fn normalize(input: &str) -> Result<String> {
     Ok(url.origin().ascii_serialization())
 }
 
-/// A short name for the panel: `launchpad.acme.example.com` becomes `acme`.
+/// The panel's name for an Environment whose Launchpad sent no name: the
+/// host of the Lazurio address, without scheme or port.
 pub fn label(origin: &str) -> String {
-    let host = Url::parse(origin)
+    Url::parse(origin)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
-        .unwrap_or_else(|| origin.to_string());
-    let rest = host.strip_prefix("launchpad.").unwrap_or(&host);
-    if rest.parse::<std::net::IpAddr>().is_ok() || rest == "localhost" {
-        return host;
-    }
-    rest.split('.').next().unwrap_or(rest).to_string()
+        .unwrap_or_else(|| origin.to_string())
 }
 
 #[cfg(test)]
@@ -84,7 +80,10 @@ mod tests {
 
     #[test]
     fn labels() {
-        assert_eq!(label("https://launchpad.acme.example.com"), "acme");
+        assert_eq!(
+            label("https://launchpad.acme.example.com"),
+            "launchpad.acme.example.com"
+        );
         assert_eq!(label("http://127.0.0.1:8123"), "127.0.0.1");
     }
 }

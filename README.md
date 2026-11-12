@@ -51,6 +51,12 @@ Prostředí přes Tailscale a Admin vaší Organizace ho musí mít schválený.
 
 Aplikace se spouští po přihlášení do systému; vypnete to v panelu.
 
+**Aktualizace** se dějí samy: aplikace se na novou verzi podívá po spuštění
+a pak každé 4 hodiny a nainstaluje ji ve chvíli, kdy na počítači zrovna
+nepracuje agent. Potom se restartuje a znovu připojí. Když chcete hned, v panelu
+se ukáže „Je k dispozici verze …“ s tlačítkem **Aktualizovat**. Aktualizaci
+může spustit i agent nástrojem `lazurio_app_update`.
+
 ## Security
 
 **What an agent can do.** While the switch is on and the computer is connected,
@@ -81,6 +87,14 @@ that Launchpad returned during pairing (`StrictHostKeyChecking=yes`, its own
 `known_hosts`, no user SSH configuration). A different host key stops the
 connection.
 
+**Updates.** The app installs only update packages signed with the updater
+key whose public half is in `src-tauri/tauri.conf.json`, only versions newer
+than the running one, and only when the signature names the same version as
+the release (`requireSignedVersion`). It reads `latest.json` of the newest
+GitHub Release that is not a pre-release. The private updater key and its
+password exist only outside this repository and as repository secrets for
+the release workflow.
+
 **Turning it off.** Switch off (no connection), **Stop** (ends the current
 session), **Remove** (deletes the key here), and removing the computer in
 Lazurio (deletes the `authorized_keys` line). Quitting the app also ends every
@@ -109,6 +123,13 @@ Contract v0 between the app and the Environment (the Environment side lives in
    computer is the MCP server and its tools are the Agent Desktop `desktop_*`
    tools. When the session drops and the switch is on, the app reconnects with a
    growing delay (1 s up to 60 s).
+
+On that same session the app adds two tools of its own, `lazurio_app_status`
+(version, system, update channel, available update) and `lazurio_app_update`
+(downloads, verifies, installs, restarts, reconnects), answers their calls
+itself and passes every other line to the engine unchanged. Its answer to
+`initialize` carries the app's version and system under
+`_meta["io.lazurio/agent-desktop"]`.
 
 The engine is [Lazurio/agent-desktop](https://github.com/Lazurio/agent-desktop),
 a fork of Agent Desktop, built in CI at the commit pinned in
@@ -139,9 +160,20 @@ npx @tauri-apps/cli@2.12.4 build --target aarch64-apple-darwin --bundles dmg
 CI builds unsigned `.dmg` (Apple silicon and Intel) and `.msi`/`.exe` (Windows
 x64) on every pull request.
 
+### Releasing
+
+Set the new version in `src-tauri/tauri.conf.json` and `Cargo.toml`
+(`[workspace.package]`), merge, then push the tag `v<version>`. The release
+workflow builds all three targets, signs the update packages, writes
+`latest.json` and publishes the GitHub Release. A tag with a pre-release part
+(`v0.2.0-rc.1`) becomes a pre-release, which installed apps never see.
+
 ### Signing
 
-The CI steps switch on when these repository secrets exist:
+Update packages are always signed with the updater key (secrets
+`TAURI_SIGNING_PRIVATE_KEY` and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`); pull
+requests without access to them build without update packages. Code signing
+switches on when these repository secrets exist:
 
 - macOS (Developer ID and notarization): `APPLE_CERTIFICATE` (base64 `.p12`),
   `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, and for notarization

@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use lazurio_agent_desktop_core::app_tools::{text_result, AppTools, AppToolsHandle};
 use lazurio_agent_desktop_core::channel::{EngineSpec, State};
 use lazurio_agent_desktop_core::keystore::MemoryStore;
 use lazurio_agent_desktop_core::manager::{EnvironmentView, Manager, ManagerConfig};
@@ -45,6 +46,39 @@ pub fn open_with_engine(
     extra: Vec<String>,
     engine: EngineSpec,
 ) -> (Arc<Manager>, Arc<MemoryStore>) {
+    open_full(data_dir, ssh_program, extra, engine, None)
+}
+
+/// App tools like the app's, answering with fixed texts.
+pub struct FakeAppTools;
+
+impl AppTools for FakeAppTools {
+    fn definitions(&self) -> Vec<serde_json::Value> {
+        vec![serde_json::json!({
+            "name": "lazurio_app_status",
+            "description": "fake",
+            "inputSchema": {"type": "object"}
+        })]
+    }
+    fn call(&self, _name: &str, _arguments: &serde_json::Value) -> serde_json::Value {
+        text_result("fake-app-status 9.9.9", false)
+    }
+    fn about(&self) -> serde_json::Value {
+        serde_json::json!({"appVersion": "9.9.9", "os": "macos", "osVersion": "27.0"})
+    }
+}
+
+pub fn app_tools() -> Option<AppToolsHandle> {
+    Some(AppToolsHandle(Arc::new(FakeAppTools)))
+}
+
+pub fn open_full(
+    data_dir: &Path,
+    ssh_program: PathBuf,
+    extra: Vec<String>,
+    engine: EngineSpec,
+    app_tools: Option<AppToolsHandle>,
+) -> (Arc<Manager>, Arc<MemoryStore>) {
     let store = Arc::new(MemoryStore::default());
     let manager = Manager::open(
         ManagerConfig {
@@ -54,6 +88,7 @@ pub fn open_with_engine(
             computer_name: "Test computer".into(),
             os: "macos".into(),
             extra_ssh_options: extra,
+            app_tools,
         },
         store.clone(),
         Arc::new(|| {}),

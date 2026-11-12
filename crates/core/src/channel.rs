@@ -10,6 +10,7 @@
 //! again after a growing delay. Turning the switch off or [`Supervisor::stop_now`]
 //! ends the session at once.
 
+use crate::app_tools::{AppToolsHandle, Route, Router};
 use crate::history::{Event, History, HistoryEntry};
 use crate::mcp_tap::{Tap, TapEvent};
 use crate::pairing::SshTarget;
@@ -47,6 +48,8 @@ pub struct ChannelConfig {
     pub engine: EngineSpec,
     /// Extra `-o` options, for tests only.
     pub extra_ssh_options: Vec<String>,
+    /// Tools the app serves itself next to the engine's.
+    pub app_tools: Option<AppToolsHandle>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -399,35 +402,87 @@ impl Worker {
 
         let (tx, rx) = mpsc::channel::<Msg>();
         let tap = Arc::new(Mutex::new(Tap::default()));
+        let router = Arc::new(Router::new(
+            self.cfg.app_tools.as_ref().map(|h| h.0.clone()),
+        ));
+        // Engine answers and the app's own answers share the way to the Environment.
+        let to_environment = Arc::new(Mutex::new(ssh.0.stdin.take().expect("piped")));
         let mut threads = Vec::new();
         {
             let from = ssh.0.stdout.take().expect("piped");
             let mut to = engine.0.stdin.take().expect("piped");
             let tap = tap.clone();
             let tx = tx.clone();
+            let router = router.clone();
+            let to_environment = to_environment.clone();
             threads.push(std::thread::spawn(move || {
                 let mut first = true;
-                pump(from, &mut to, |line| {
+                for_each_line(from, |line| {
                     if first {
                         first = false;
                         let _ = tx.send(Msg::EnvironmentSpoke);
                     }
-                    for e in tap.lock().unwrap().from_environment(line) {
-                        let _ = tx.send(Msg::Tap(e));
+                    match router.route_environment_line(line) {
+                        Route::Engine => {
+                            for e in tap.lock().unwrap().from_environment(line) {
+                                let _ = tx.send(Msg::Tap(e));
+                            }
+                            to.write_all(line).and_then(|_| to.flush()).is_ok()
+                        }
+                        Route::Local {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            let Some(tools) = router.tools().cloned() else {
+                                return true;
+                            };
+                            let tx = tx.clone();
+                            let to_environment = to_environment.clone();
+                            // Its own thread: an update check may take a while
+                            // and the Environment's pings must keep flowing.
+                            std::thread::spawn(move || {
+                                let started = Instant::now();
+                                let app = arguments["app"].as_str().map(str::to_string);
+                                let _ = tx.send(Msg::Tap(TapEvent::ToolStarted {
+                                    tool: name.clone(),
+                                    app,
+                                }));
+                                let result = tools.call(&name, &arguments);
+                                let ok = !result["isError"].as_bool().unwrap_or(false);
+                                let answer =
+                                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+                                let mut bytes = serde_json::to_vec(&answer).unwrap_or_default();
+                                bytes.push(b'\n');
+                                let mut out = to_environment.lock().unwrap();
+                                let _ = out.write_all(&bytes).and_then(|_| out.flush());
+                                drop(out);
+                                let _ = tx.send(Msg::Tap(TapEvent::ToolFinished {
+                                    tool: name,
+                                    ok,
+                                    ms: started.elapsed().as_millis() as u64,
+                                }));
+                            });
+                            true
+                        }
                     }
                 });
             }));
         }
         {
             let from = engine.0.stdout.take().expect("piped");
-            let mut to = ssh.0.stdin.take().expect("piped");
             let tap = tap.clone();
             let tx = tx.clone();
+            let router = router.clone();
+            let to_environment = to_environment.clone();
             threads.push(std::thread::spawn(move || {
-                pump(from, &mut to, |line| {
+                for_each_line(from, |line| {
                     for e in tap.lock().unwrap().from_engine(line) {
                         let _ = tx.send(Msg::Tap(e));
                     }
+                    let line = router.rewrite_engine_line(line);
+                    let mut out = to_environment.lock().unwrap();
+                    out.write_all(&line).and_then(|_| out.flush()).is_ok()
                 });
             }));
         }
@@ -552,7 +607,9 @@ impl Worker {
     }
 }
 
-fn pump(from: impl Read, to: &mut impl Write, mut observe: impl FnMut(&[u8])) {
+/// Calls `handle` with every line (newline included) until EOF, an error, or
+/// `handle` returns false.
+fn for_each_line(from: impl Read, mut handle: impl FnMut(&[u8]) -> bool) {
     let mut reader = BufReader::with_capacity(64 * 1024, from);
     let mut line = Vec::with_capacity(64 * 1024);
     loop {
@@ -560,8 +617,7 @@ fn pump(from: impl Read, to: &mut impl Write, mut observe: impl FnMut(&[u8])) {
         match reader.read_until(b'\n', &mut line) {
             Ok(0) | Err(_) => break,
             Ok(_) => {
-                observe(&line);
-                if to.write_all(&line).and_then(|_| to.flush()).is_err() {
+                if !handle(&line) {
                     break;
                 }
             }

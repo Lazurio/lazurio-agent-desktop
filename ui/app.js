@@ -150,6 +150,19 @@ async function renderHistory() {
   }
 }
 
+function renderUpdate() {
+  const u = view.update;
+  const box = document.getElementById("update");
+  const button = document.getElementById("update-button");
+  let text = "";
+  if (u.installing) text = t("updateInstalling");
+  else if (u.available) text = t("updateAvailable", { version: u.available });
+  if (!u.installing && u.available && u.error) text += " " + t("updateFailed", { message: u.error });
+  document.getElementById("update-text").textContent = text;
+  button.hidden = !u.available || u.installing;
+  box.hidden = !text;
+}
+
 function renderPairing() {
   document.getElementById("pairing").hidden = !pairing;
   document.querySelector("#add-form button").disabled = pairing;
@@ -159,9 +172,11 @@ async function refresh() {
   view = await invoke("state");
   document.getElementById("version").textContent = `v${view.version}`;
   document.getElementById("autostart").checked = view.autostart;
+  document.getElementById("computer-name").textContent = t("addAs", { name: view.computerName });
   renderEnvironments();
   renderPermissions();
   renderPairing();
+  renderUpdate();
   renderHistory();
 }
 
@@ -192,6 +207,10 @@ document.getElementById("add-form").addEventListener("submit", async (e) => {
   }
 });
 
+document.getElementById("update-button").addEventListener("click", async (e) => {
+  e.target.disabled = true;
+  try { await invoke("install_update"); } catch (err) { /* shown from state */ } finally { e.target.disabled = false; refresh(); }
+});
 document.getElementById("pairing-cancel").addEventListener("click", () => invoke("cancel_pairing"));
 document.getElementById("perm-recheck").addEventListener("click", refresh);
 document.getElementById("history-box").addEventListener("toggle", renderHistory);
