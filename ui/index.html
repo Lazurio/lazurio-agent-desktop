@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lazurio Agent Desktop</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="i18n.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <h1>Lazurio Agent Desktop</h1>
+    <button class="help-toggle" data-help="help-app" aria-expanded="false" data-i18n-title="helpButton">?</button>
+  </header>
+  <p id="help-app" class="help" hidden data-i18n="helpApp"></p>
+
+  <section id="permissions" hidden>
+    <div class="section-head">
+      <h2 data-i18n="permTitle"></h2>
+      <button class="help-toggle" data-help="help-perm" aria-expanded="false" data-i18n-title="helpButton">?</button>
+    </div>
+    <p id="help-perm" class="help" hidden data-i18n="helpPerm"></p>
+    <div class="perm-row" data-kind="accessibility">
+      <span data-i18n="permAccessibility"></span>
+      <span class="perm-state"></span>
+    </div>
+    <div class="perm-row" data-kind="screen-recording">
+      <span data-i18n="permScreen"></span>
+      <span class="perm-state"></span>
+    </div>
+    <p class="note" data-i18n="permRestart"></p>
+    <button id="perm-recheck" class="link" data-i18n="permRecheck"></button>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2 data-i18n="envTitle"></h2>
+      <button class="help-toggle" data-help="help-env" aria-expanded="false" data-i18n-title="helpButton">?</button>
+    </div>
+    <p id="help-env" class="help" hidden data-i18n="helpEnv"></p>
+    <ul id="environments" class="cards"></ul>
+    <p id="no-env" class="empty" hidden data-i18n="envEmpty"></p>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2 data-i18n="addTitle"></h2>
+      <button class="help-toggle" data-help="help-add" aria-expanded="false" data-i18n-title="helpButton">?</button>
+    </div>
+    <p id="help-add" class="help" hidden data-i18n="helpAdd"></p>
+    <form id="add-form" autocomplete="off">
+      <label class="sr-only" for="launchpad" data-i18n="addLabel"></label>
+      <input id="launchpad" type="text" inputmode="url" spellcheck="false" data-i18n-placeholder="addPlaceholder">
+      <button type="submit" class="primary" data-i18n="addButton"></button>
+    </form>
+    <div id="pairing" hidden>
+      <p data-i18n="pairingWait"></p>
+      <p class="note"><span data-i18n="pairingFingerprint"></span> <code id="fingerprint"></code></p>
+      <button id="pairing-cancel" class="link" data-i18n="cancel"></button>
+    </div>
+    <p id="add-error" class="error" hidden></p>
+  </section>
+
+  <section>
+    <div class="section-head">
+      <h2 data-i18n="historyTitle"></h2>
+      <button class="help-toggle" data-help="help-history" aria-expanded="false" data-i18n-title="helpButton">?</button>
+    </div>
+    <p id="help-history" class="help" hidden data-i18n="helpHistory"></p>
+    <details id="history-box">
+      <summary data-i18n="historyShow"></summary>
+      <ol id="history" class="history"></ol>
+    </details>
+  </section>
+
+  <footer>
+    <label class="check"><input id="autostart" type="checkbox"> <span data-i18n="autostart"></span></label>
+    <span class="spacer"></span>
+    <span id="version" class="note"></span>
+    <button id="quit" class="link" data-i18n="quit"></button>
+  </footer>
+  <div id="quit-confirm" class="confirm" hidden>
+    <p class="note" data-i18n="quitConfirm"></p>
+    <div class="actions">
+      <button id="quit-yes" class="stop" data-i18n="quit"></button>
+      <button id="quit-no" class="link" data-i18n="cancel"></button>
+    </div>
+  </div>
+</body>
+</html>

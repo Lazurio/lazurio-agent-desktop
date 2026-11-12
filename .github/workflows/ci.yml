@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  TAURI_CLI_VERSION: 2.12.4
+
+jobs:
+  core:
+    name: Core (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, sshd: "1" }
+          - { os: macos-14, target: aarch64-apple-darwin, sshd: "0" }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, sshd: "0" }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc, sshd: "0" }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        shell: bash
+        run: rustup toolchain install 2>/dev/null || rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core-${{ matrix.target }}
+      - name: Format
+        if: matrix.sshd == '1'
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --locked -p lazurio-agent-desktop-core -p lazurio-agent-desktop-testkit --all-targets -- -D warnings
+      - name: OpenSSH server for the end-to-end test
+        if: matrix.sshd == '1'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q openssh-server
+          # sshd without PAM refuses accounts whose password is locked ("!"); the runner's is.
+          if sudo passwd -S "$USER" | awk '{print $2}' | grep -q '^L'; then sudo usermod -p '*' "$USER"; fi
+      - name: Test
+        env:
+          LAD_REQUIRE_SSHD: ${{ matrix.sshd }}
+        run: cargo test --locked -p lazurio-agent-desktop-core -p lazurio-agent-desktop-testkit
+
+  app:
+    name: App (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin, bundles: dmg }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, bundles: dmg }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc, bundles: "msi,nsis" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: app-${{ matrix.target }}
+          workspaces: |
+            . -> target
+            .engine-src -> target
+      - name: Build the Agent Desktop engine (pinned fork commit)
+        shell: bash
+        run: scripts/build-engine.sh ${{ matrix.target }}
+      - name: App toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 2>/dev/null || rustup show
+          rustup target add ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Clippy (app)
+        run: cargo clippy --locked -p lazurio-agent-desktop --target ${{ matrix.target }} -- -D warnings
+
+      # Signing switches on by itself once the secrets exist; until then the
+      # macOS build is ad-hoc signed and the Windows build unsigned (internal tests only).
+      - name: macOS signing and notarization (with secrets only)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            {
+              echo "APPLE_CERTIFICATE<<LAD_EOF"; echo "$APPLE_CERTIFICATE"; echo "LAD_EOF"
+              echo "APPLE_CERTIFICATE_PASSWORD<<LAD_EOF"; echo "$APPLE_CERTIFICATE_PASSWORD"; echo "LAD_EOF"
+              echo "APPLE_SIGNING_IDENTITY<<LAD_EOF"; echo "$APPLE_SIGNING_IDENTITY"; echo "LAD_EOF"
+            } >> "$GITHUB_ENV"
+            echo "Signing with Developer ID."
+          else
+            echo "No Developer ID certificate: ad-hoc signed build for internal tests."
+          fi
+          if [ -n "$APPLE_API_KEY_P8" ] && [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ]; then
+            key_path="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY.p8"
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$key_path"
+            {
+              echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+              echo "APPLE_API_KEY=$APPLE_API_KEY"
+              echo "APPLE_API_KEY_PATH=$key_path"
+            } >> "$GITHUB_ENV"
+            echo "Notarizing with an App Store Connect API key."
+          fi
+      - name: Windows signing (with secrets only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { "No Windows certificate: unsigned build for internal tests."; exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $conf = @{ bundle = @{ windows = @{
+            certificateThumbprint = $cert.Thumbprint
+            digestAlgorithm = "sha256"
+            timestampUrl = "http://timestamp.digicert.com"
+          } } } | ConvertTo-Json -Depth 5
+          Set-Content -Path src-tauri/tauri.signing.conf.json -Value $conf
+          "TAURI_SIGNING_ARGS=--config src-tauri/tauri.signing.conf.json" >> $env:GITHUB_ENV
+          "Signing with certificate $($cert.Subject)."
+
+      - name: Build the app
+        shell: bash
+        run: npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} ${TAURI_SIGNING_ARGS:-}
+      - name: The bundled engine answers MCP initialize
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            *-apple-darwin)
+              dir="target/${{ matrix.target }}/release/bundle/macos/Lazurio Agent Desktop.app/Contents/MacOS"
+              test -x "$dir/agent-desktop-macos-helper"
+              engine="$dir/agent-desktop" ;;
+            *) engine="target/${{ matrix.target }}/release/agent-desktop.exe" ;;
+          esac
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            | "$engine" mcp | head -n 1 | tee initialize.json
+          grep -q '"serverInfo"' initialize.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazurio-agent-desktop-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            target/${{ matrix.target }}/release/bundle/msi/*.msi
+            target/${{ matrix.target }}/release/bundle/nsis/*.exe

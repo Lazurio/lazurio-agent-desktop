@@ -1,0 +1,6 @@
+/target
+/.engine-src
+/src-tauri/binaries/
+/src-tauri/resources/agent-desktop-LICENSE
+/src-tauri/gen/
+.DS_Store

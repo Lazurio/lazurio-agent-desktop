@@ -1,0 +1,25 @@
+[workspace]
+members         = ["crates/core", "crates/testkit", "src-tauri"]
+# The tray app needs the platform webview toolkit; the core and its tests build anywhere.
+default-members = ["crates/core", "crates/testkit"]
+resolver        = "2"
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.85"
+publish      = false
+
+[workspace.dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror  = "2"
+base64     = "0.22"
+url        = "2"
+zeroize    = "1"
+lazurio-agent-desktop-core = { path = "crates/core" }
+
+[profile.release]
+lto           = true
+codegen-units = 1
+strip         = true
