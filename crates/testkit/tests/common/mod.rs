@@ -120,9 +120,10 @@ pub fn state_of(manager: &Manager, id: &str) -> State {
         .unwrap_or(State::Off)
 }
 
+/// Complete lines only: a line still being written does not count.
 pub fn lines(path: &Path) -> usize {
     std::fs::read_to_string(path)
-        .map(|s| s.lines().count())
+        .map(|s| s.matches('\n').count())
         .unwrap_or(0)
 }
 

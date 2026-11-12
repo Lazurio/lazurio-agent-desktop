@@ -118,7 +118,8 @@ fn main() {
             .append(true)
             .open(path)
             .unwrap();
-        writeln!(f, "{summary}").unwrap();
+        // One write, so a reader never sees half a line.
+        f.write_all(format!("{summary}\n").as_bytes()).unwrap();
     }
     std::thread::sleep(std::time::Duration::from_millis(hold_ms));
 }
