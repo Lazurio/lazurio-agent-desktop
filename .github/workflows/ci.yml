@@ -152,13 +152,22 @@ jobs:
           case "${{ matrix.target }}" in
             *-apple-darwin)
               dir="target/${{ matrix.target }}/release/bundle/macos/Lazurio Agent Desktop.app/Contents/MacOS"
+              ls -l "$dir"
               test -x "$dir/agent-desktop-macos-helper"
               engine="$dir/agent-desktop" ;;
             *) engine="target/${{ matrix.target }}/release/agent-desktop.exe" ;;
           esac
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
-            | "$engine" mcp | head -n 1 | tee initialize.json
-          grep -q '"serverInfo"' initialize.json
+            '{"jsonrpc":"2.0","id":2,"method":"ping"}' > requests.jsonl
+          set +e
+          "$engine" mcp < requests.jsonl > answers.jsonl 2> engine.err
+          code=$?
+          set -e
+          echo "exit status: $code"
+          echo "--- stderr"; head -c 4000 engine.err; echo
+          echo "--- stdout"; head -c 4000 answers.jsonl; echo
+          grep -q '"serverInfo"' answers.jsonl
+          grep '"id":2' answers.jsonl | grep -q '"result"'
       - uses: actions/upload-artifact@v4
         with:
           name: lazurio-agent-desktop-${{ matrix.target }}

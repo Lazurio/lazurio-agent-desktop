@@ -4,7 +4,8 @@
 //! place of the `ssh` program itself, when it receives the ssh arguments and
 //! reads its settings from `-o LadOut=FILE`, `-o LadHoldMs=N` and `-o LadReject=1`.
 //!
-//! It initializes the computer's MCP server, lists its tools, calls one tool
+//! It initializes the computer's MCP server, pings it like the Environment's
+//! broker does every 15 s, lists its tools, calls one tool
 //! that succeeds and one that fails, appends a summary line to the out file and exits after the
 //! hold time, which ends the session like a dropped connection would.
 
@@ -69,6 +70,8 @@ fn main() {
     );
     let init = wait_for("b0");
     send(json!({"jsonrpc": "2.0", "method": "notifications/initialized"}));
+    send(json!({"jsonrpc": "2.0", "id": "p1", "method": "ping"}));
+    let ping = wait_for("p1");
     send(json!({"jsonrpc": "2.0", "id": "l1", "method": "tools/list", "params": {}}));
     let list = wait_for("l1");
     send(
@@ -84,6 +87,7 @@ fn main() {
 
     let summary = json!({
         "server": init["result"]["serverInfo"]["name"],
+        "ping": ping["result"].is_object(),
         "tools": list["result"]["tools"].as_array().map_or(0, Vec::len),
         "c1_ok": c1["result"]["isError"] == false,
         "c2_error": c2["result"]["isError"] == true,

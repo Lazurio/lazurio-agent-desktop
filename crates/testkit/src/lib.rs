@@ -25,6 +25,7 @@ pub struct Approval {
     pub port: u16,
     /// Sent as Launchpad would: a key line, with or without a host name.
     pub known_hosts: String,
+    /// Pressing Cancel on the page: the callback gets `error=cancelled`.
     pub decline: bool,
     /// Called with the query and the device id before redirecting.
     pub on_approve: Option<Hook>,
@@ -89,7 +90,7 @@ fn serve(mut stream: TcpStream, approval: &Approval, reqs: &Mutex<Vec<Query>>) {
         location
             .query_pairs_mut()
             .append_pair("state", &state)
-            .append_pair("error", "denied");
+            .append_pair("error", "cancelled");
     } else {
         if let Some(hook) = &approval.on_approve {
             hook(&q, &approval.device_id);

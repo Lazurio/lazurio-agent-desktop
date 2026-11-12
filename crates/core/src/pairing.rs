@@ -330,7 +330,7 @@ fn is_key_type(f: &str) -> bool {
 }
 
 const PAGE_DONE: &str = "<!doctype html><meta charset=utf-8><title>Lazurio Agent Desktop</title><body style=\"font:16px system-ui;margin:48px\"><p>Počítač je připojený k Lazuriu. Toto okno můžete zavřít.</p><p lang=en>This computer is connected to Lazurio. You can close this window.</p>";
-const PAGE_DECLINED: &str = "<!doctype html><meta charset=utf-8><title>Lazurio Agent Desktop</title><body style=\"font:16px system-ui;margin:48px\"><p>Připojení jste nepovolili. Toto okno můžete zavřít.</p><p lang=en>You did not allow the connection. You can close this window.</p>";
+const PAGE_DECLINED: &str = "<!doctype html><meta charset=utf-8><title>Lazurio Agent Desktop</title><body style=\"font:16px system-ui;margin:48px\"><p>Připojení jste zrušili. Toto okno můžete zavřít.</p><p lang=en>You cancelled the connection. You can close this window.</p>";
 const PAGE_FAILED: &str = "<!doctype html><meta charset=utf-8><title>Lazurio Agent Desktop</title><body style=\"font:16px system-ui;margin:48px\"><p>Připojení se nepovedlo. Zkuste to v aplikaci znovu.</p><p lang=en>Connecting failed. Please try again in the app.</p>";
 const PAGE_INVALID: &str = "<!doctype html><meta charset=utf-8><title>Lazurio Agent Desktop</title><body style=\"font:16px system-ui;margin:48px\"><p>Neplatný požadavek.</p><p lang=en>Invalid request.</p>";
 

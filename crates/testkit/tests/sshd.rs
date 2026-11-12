@@ -121,7 +121,8 @@ fn launchpad(sshd: &Sshd, dir: &Path, out: &Path, known_hosts: String) -> FakeLa
         known_hosts,
         decline: false,
         on_approve: Some(Box::new(move |q, device| {
-            // The line contract v0 asks Launchpad to write.
+            // The line Launchpad writes (contract v0 with the absolute path of
+            // `lazurio`; here the forced command is the fake attach).
             let line = format!(
                 "restrict,command=\"{} --out {}\" {} lazurio-computer:{device}:test:2026-11-12\n",
                 attach.display(),
@@ -170,6 +171,7 @@ fn pairs_and_serves_mcp_over_real_openssh() {
     )
     .unwrap();
     assert_eq!(first["server"], "fake-engine");
+    assert_eq!(first["ping"], true);
     assert_eq!(first["tools"], 2);
     assert_eq!(first["c1_ok"], true);
     assert_eq!(first["c2_error"], true);
@@ -248,6 +250,10 @@ fn real_engine_over_real_openssh() {
     )
     .unwrap();
     assert_eq!(first["server"], "agent-desktop", "{first}");
+    assert_eq!(
+        first["ping"], true,
+        "the broker's liveness ping needs an answer"
+    );
     assert!(first["tools"].as_u64().unwrap() > 10, "{first}");
     manager.set_enabled(&view.id, false).unwrap();
     assert!(wait(10, || state_of(&manager, &view.id) == State::Off));

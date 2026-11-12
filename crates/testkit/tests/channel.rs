@@ -46,6 +46,7 @@ fn serves_mcp_reconnects_and_obeys_the_switch() {
     )
     .unwrap();
     assert_eq!(first["server"], "fake-engine");
+    assert_eq!(first["ping"], true);
     assert_eq!(first["tools"], 2);
     assert_eq!(first["c1_ok"], true);
     assert_eq!(first["c2_error"], true);

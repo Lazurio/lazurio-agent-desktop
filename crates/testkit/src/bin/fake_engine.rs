@@ -23,6 +23,7 @@ fn main() {
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "fake-engine", "version": "0"}
             }}),
+            "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
             "tools/list" => json!({"jsonrpc": "2.0", "id": id, "result": {"tools": [
                 {"name": "desktop_fake_tool", "inputSchema": {"type": "object"}},
                 {"name": "desktop_fail", "inputSchema": {"type": "object"}}

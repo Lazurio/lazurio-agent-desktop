@@ -688,7 +688,12 @@ fn classify(stderr: &str, initialized: bool, exit: Option<i32>) -> Reason {
         Reason::HostKey
     } else if has(&["permission denied"]) {
         Reason::NotAuthorized
-    } else if has(&["already connected", "už připojen", "jinou relací"]) {
+    } else if has(&[
+        "already attached",
+        "already connected",
+        "už připojen",
+        "jinou relací",
+    ]) {
         Reason::AlreadyConnected
     } else if has(&[
         "could not resolve hostname",
@@ -802,7 +807,11 @@ mod tests {
             Reason::Offline
         );
         assert_eq!(
-            classify("Počítač x je už připojený jinou relací.", false, Some(2)),
+            classify(
+                "Počítač x je už připojený jinou relací. (Computer x is already attached in another session.)",
+                false,
+                Some(2)
+            ),
             Reason::AlreadyConnected
         );
         assert_eq!(classify("", true, Some(0)), Reason::Ended);

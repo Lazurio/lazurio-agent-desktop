@@ -70,8 +70,11 @@ latest after 30 seconds, and on every start of the app).
 
 **What the Environment can do with the key.** Launchpad writes the public key
 to `authorized_keys` of the Environment's account with
-`restrict,command="lazurio computer attach --device <id>"`, so the key can only
-start that one command: no shell, no port forwarding, no agent forwarding.
+`restrict,command="<home>/.local/bin/lazurio computer attach --device <id>"`, so
+the key can only start that one command: no shell, no port forwarding, no agent
+forwarding. The Environment pings the computer every 15 seconds, ends the
+session when the key is removed there, and lets one agent at a time use the
+computer; an agent's turn also ends after 2 minutes without a call.
 
 **What the computer trusts.** The app connects only to the host and host key
 that Launchpad returned during pairing (`StrictHostKeyChecking=yes`, its own
@@ -97,7 +100,8 @@ Contract v0 between the app and the Environment (the Environment side lives in
    `https://<launchpad>/connect/computer?name=…&os=…&pubkey=…&callback=http://127.0.0.1:<port>/cb&state=…`
    in the browser. After the owner approves, Launchpad redirects to the
    callback with the same `state` and `result` = base64url JSON
-   `{ deviceId, ssh: { host, user, knownHosts } }`.
+   `{ deviceId, ssh: { host, user, knownHosts } }`; Cancel on the page returns
+   `error=cancelled` instead.
 2. **Channel.** While the switch is on, the app starts the system OpenSSH client
    (`/usr/bin/ssh`, `%WINDIR%\System32\OpenSSH\ssh.exe`) to the Environment and
    the Agent Desktop MCP server (`agent-desktop mcp`), and joins their stdio line

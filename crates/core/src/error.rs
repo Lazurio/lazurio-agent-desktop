@@ -7,7 +7,8 @@ pub enum Error {
     PairingCancelled,
     #[error("pairing timed out")]
     PairingTimedOut,
-    #[error("pairing was declined in Lazurio")]
+    /// Cancel on the Launchpad page (`error=cancelled`) or any other `error`.
+    #[error("pairing was cancelled in Lazurio")]
     PairingDeclined,
     #[error("invalid pairing result: {0}")]
     InvalidPairingResult(String),
