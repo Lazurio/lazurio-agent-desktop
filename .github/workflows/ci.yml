@@ -145,7 +145,15 @@ jobs:
 
       - name: Build the app
         shell: bash
-        run: npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} ${TAURI_SIGNING_ARGS:-}
+        # hdiutil on hosted macOS runners sometimes cannot eject the dmg it just
+        # built ("Resource busy"); a second attempt passes.
+        run: |
+          for attempt in 1 2 3; do
+            npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" build --ci --target ${{ matrix.target }} --bundles ${{ matrix.bundles }} ${TAURI_SIGNING_ARGS:-} && exit 0
+            echo "::warning::bundling attempt $attempt failed"
+            sleep 15
+          done
+          exit 1
       - name: The bundled engine answers MCP initialize
         shell: bash
         run: |
