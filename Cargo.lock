@@ -2264,7 +2264,7 @@ dependencies = [
 
 [[package]]
 name = "lazurio-agent-desktop"
-version = "0.1.0-pilot.1"
+version = "0.1.0-pilot.2"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "lazurio-agent-desktop-core"
-version = "0.1.0-pilot.1"
+version = "0.1.0-pilot.2"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
@@ -2304,7 +2304,7 @@ dependencies = [
 
 [[package]]
 name = "lazurio-agent-desktop-testkit"
-version = "0.1.0-pilot.1"
+version = "0.1.0-pilot.2"
 dependencies = [
  "base64 0.22.1",
  "lazurio-agent-desktop-core",
