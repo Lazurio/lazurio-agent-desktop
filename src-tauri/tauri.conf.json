@@ -29,6 +29,7 @@
   "bundle": {
     "active": true,
     "publisher": "Lazurio",
+    "license": "Elastic-2.0",
     "category": "Utility",
     "shortDescription": "Lets agents of your Lazurio Environment use the apps on this computer while you allow it.",
     "icon": [

@@ -154,6 +154,7 @@ The CI steps switch on when these repository secrets exist:
 
 ## License
 
-Not decided yet. Until a license is added, no rights are granted beyond what
-GitHub's terms allow. The bundled Agent Desktop engine is Apache-2.0, see
+Lazurio Agent Desktop is licensed under the [Elastic License 2.0](LICENSE)
+(`Elastic-2.0`), like [Lazurio/LazurioPlatform](https://github.com/Lazurio/LazurioPlatform).
+The bundled Agent Desktop engine stays under Apache-2.0, see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
