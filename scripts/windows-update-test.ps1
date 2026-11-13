@@ -111,16 +111,20 @@ if ($OldInstaller) {
 }
 
 # 4. The new installer, exactly as the updater runs it.
+$appBefore = Hash $App
 $code = Run-Installer $NewInstaller @("/P", "/UPDATE", "/R", "/ARGS", "--at-login") 300 "new-installer"
 Write-Host "new installer /P /UPDATE /R over the running installation: exit $code"
 if ("$code" -ne "0") { throw "the update over a running installation did not complete (exit $code)" }
 if (-not $engineProcess.HasExited) { throw "the running engine survived the update" }
-foreach ($name in @("lazurio-agent-desktop.exe", "agent-desktop.exe")) {
-    $installed = Hash (Join-Path $InstallDir $name)
-    $built = Hash (Join-Path $BuildDir $name)
-    if ($installed -ne $built) { throw "$name was not replaced by the new build" }
-}
-Write-Host "installed files match the new build"
+# The engine is bundled as built; the app binary is adjusted by the bundler,
+# so it has to be a different file now and carry the new version.
+if ((Hash $Engine) -ne (Hash (Join-Path $BuildDir "agent-desktop.exe"))) { throw "agent-desktop.exe was not replaced by the new build" }
+$newVersion = (Get-Item (Join-Path $BuildDir "lazurio-agent-desktop.exe")).VersionInfo.ProductVersion
+$installedVersion = (Get-Item $App).VersionInfo.ProductVersion
+Write-Host "app version installed: $installedVersion, built: $newVersion"
+if ($OldInstaller -and (Hash $App) -eq $appBefore) { throw "lazurio-agent-desktop.exe was not replaced" }
+if ($installedVersion -ne $newVersion) { throw "the installed app is not the new version" }
+Write-Host "installed files are the new build"
 
 # /R: the installer starts the app again.
 $relaunched = $false

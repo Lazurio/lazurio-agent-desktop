@@ -195,8 +195,7 @@ mod windows {
         path.starts_with(&dir)
     }
 
-    /// The folder in the long form Windows reports image paths in (no 8.3
-    /// short names, no `\\?\` prefix).
+    /// A path in its long form: no 8.3 short names, no `\\?\` prefix.
     fn long_form(dir: &Path) -> std::path::PathBuf {
         std::fs::canonicalize(dir)
             .map(|p| {
@@ -229,7 +228,10 @@ mod windows {
                         pid,
                     );
                     if !process.is_null() {
-                        if image_path(process).is_some_and(|p| starts_with_dir(&p, dir)) {
+                        // A process started through a short (8.3) path reports
+                        // that path; compare both in the long form.
+                        if image_path(process).is_some_and(|p| starts_with_dir(&long_form(&p), dir))
+                        {
                             TerminateProcess(process, 1);
                             let left = deadline.saturating_duration_since(Instant::now());
                             WaitForSingleObject(
