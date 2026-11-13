@@ -218,7 +218,25 @@ pub async fn install(app: AppHandle) -> Result<(), String> {
         }
     };
     // From here on the old version stops: end the channels cleanly first.
+    // Each channel ends its engine with everything the engine started.
     app.state::<AppState>().manager.shutdown();
+    // Windows cannot replace a running .exe, and the NSIS installer aborts
+    // when it meets one. Whatever still runs from this installation (except
+    // this process, which the updater ends itself) goes now.
+    if cfg!(windows) {
+        if let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        {
+            let ended = lazurio_agent_desktop_core::process_tree::end_processes_in(
+                &dir,
+                Duration::from_secs(10),
+            );
+            if ended > 0 {
+                eprintln!("ended {ended} leftover process(es) before the update");
+            }
+        }
+    }
     if let Err(e) = update.install(bytes) {
         // The channels are down; a restart of the current version brings them back.
         eprintln!("update install failed: {e}");

@@ -15,6 +15,7 @@ use crate::history::{Event, History, HistoryEntry};
 use crate::mcp_tap::{Tap, TapEvent};
 use crate::pairing::SshTarget;
 use crate::platform::{hide_console, write_atomic, write_private_file};
+use crate::process_tree::ProcessTree;
 use crate::time::{now_ms, rfc3339};
 use crate::Result;
 use rand_core::{OsRng, RngCore};
@@ -134,6 +135,8 @@ const KEY_FILE_MAX_AGE: Duration = Duration::from_secs(30);
 /// A session that ran this long resets the reconnect delay.
 const STABLE_SESSION: Duration = Duration::from_secs(30);
 const RECONNECT_AFTER_STOP: Duration = Duration::from_secs(3);
+/// How long ending a session waits for its processes to be gone.
+const TREE_END_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct Ctl {
     enabled: bool,
@@ -400,6 +403,11 @@ impl Worker {
             Err(_) => return fail(Reason::SshMissing),
         };
 
+        // Engine, ssh and everything they start end together (Windows: one job).
+        let tree = ProcessTree::new();
+        tree.adopt(&engine.0);
+        tree.adopt(&ssh.0);
+
         let (tx, rx) = mpsc::channel::<Msg>();
         let tap = Arc::new(Mutex::new(Tap::default()));
         let router = Arc::new(Router::new(
@@ -583,6 +591,7 @@ impl Worker {
         }
 
         drop(key_file);
+        tree.end(TREE_END_TIMEOUT);
         let ssh_status = ssh.finish();
         engine.finish();
         for t in threads {

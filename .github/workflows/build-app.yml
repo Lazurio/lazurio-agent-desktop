@@ -159,6 +159,18 @@ jobs:
             # The app requires the signed version (requireSignedVersion).
             echo "$comment" | grep -q "version:$version"
           done
+      - name: Update over a running installation (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $new = Get-ChildItem "target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          # The first pilot release has no pre-install hook: the situation on the pilot computer.
+          $old = Join-Path $env:RUNNER_TEMP "old-setup.exe"
+          gh release download v0.1.0-pilot.1 --repo "${{ github.repository }}" --pattern "*x64-setup.exe" --output $old --clobber
+          $oldArg = if (Test-Path $old) { $old } else { "" }
+          ./scripts/windows-update-test.ps1 -NewInstaller $new.FullName -BuildDir (Resolve-Path "target/${{ matrix.target }}/release").Path -OldInstaller $oldArg
       - name: The bundled engine answers MCP initialize
         shell: bash
         run: |
