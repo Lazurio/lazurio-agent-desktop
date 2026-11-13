@@ -19,6 +19,7 @@ pub mod launchpad;
 pub mod lock;
 pub mod manager;
 pub mod mcp_tap;
+pub mod notifier;
 pub mod pairing;
 pub mod platform;
 pub mod process_tree;

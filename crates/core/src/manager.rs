@@ -7,6 +7,7 @@ use crate::history::{Event, History, HistoryEntry};
 use crate::keys::DeviceKey;
 use crate::keystore::SecretStore;
 use crate::lock::{ComputerLock, Holder};
+use crate::notifier::Notifier;
 use crate::pairing::{PairingRequest, PairingSession};
 use crate::store::{EnvironmentRecord, Store};
 use crate::{launchpad, time, Error, Result};
@@ -16,7 +17,14 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// How long ending the channels waits for them to close cleanly: the close
+/// frame to the Environment, the engine ended with everything it started, the
+/// history written. That normally takes a fraction of a second, because a
+/// channel never waits for the app while it ends. A channel that needs longer
+/// (still connecting, a slow network) finishes on its own; nobody waits for it.
+pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 pub struct ManagerConfig {
     pub data_dir: PathBuf,
@@ -60,6 +68,9 @@ pub struct PendingPairing {
     pub fingerprint: String,
 }
 
+/// Told that the panel's state changed. Called on a thread of the core's own,
+/// never on a channel thread, and possibly once for several changes; it may
+/// take its time without holding up any channel.
 pub type ChangeListener = Arc<dyn Fn() + Send + Sync>;
 
 struct Inner {
@@ -74,7 +85,8 @@ pub struct Manager {
     store: Store,
     keystore: Arc<dyn SecretStore>,
     history: Arc<History>,
-    on_change: ChangeListener,
+    /// Delivers changes to the app's listener off the channel threads.
+    changes: Arc<Notifier>,
     inner: Mutex<Inner>,
     lock: Arc<ComputerLock>,
 }
@@ -105,16 +117,18 @@ impl Manager {
             store.save(&records)?;
         }
         let lock = Arc::new(ComputerLock::with_linger(cfg.hold_after_last_call));
+        let changes = Arc::new(Notifier::spawn(on_change));
         {
-            let on_change = on_change.clone();
-            lock.set_listener(Arc::new(move || on_change()));
+            // The lock changes hands on channel threads: mark only.
+            let changes = changes.clone();
+            lock.set_listener(Arc::new(move || changes.notify()));
         }
         let manager = Arc::new(Self {
             lock,
             history: Arc::new(History::new(cfg.data_dir.join("history.jsonl"))),
             store,
             keystore,
-            on_change,
+            changes,
             inner: Mutex::new(Inner {
                 records: Vec::new(),
                 supervisors: HashMap::new(),
@@ -152,8 +166,8 @@ impl Manager {
                 .map_err(|_| Error::Key("stored key has the wrong length".into()))?;
             Ok(zeroize::Zeroizing::new(seed))
         });
-        let on_change = self.on_change.clone();
-        let listener: StatusListener = Arc::new(move |_, _| on_change());
+        let changes = self.changes.clone();
+        let listener: StatusListener = Arc::new(move |_, _| changes.notify());
         let cfg = ChannelConfig {
             env_id: rec.id.clone(),
             env_label: rec.label.clone(),
@@ -286,7 +300,7 @@ impl Manager {
             self.store.save(&inner.records)?;
         }
         self.history.record(&id, Event::Paired);
-        (self.on_change)();
+        self.changes.notify();
         self.environments()
             .into_iter()
             .find(|e| e.id == id)
@@ -318,7 +332,7 @@ impl Manager {
                 Event::SwitchedOff
             },
         );
-        (self.on_change)();
+        self.changes.notify();
         Ok(())
     }
 
@@ -349,7 +363,7 @@ impl Manager {
                 Event::CommandsOff
             },
         );
-        (self.on_change)();
+        self.changes.notify();
         Ok(())
     }
 
@@ -396,11 +410,11 @@ impl Manager {
             inner.supervisors.remove(id)
         };
         if let Some(s) = sup {
-            s.shutdown();
+            s.shutdown(SHUTDOWN_GRACE);
         }
         self.keystore.delete(&account(id))?;
         self.history.record(id, Event::Removed);
-        (self.on_change)();
+        self.changes.notify();
         Ok(())
     }
 
@@ -408,18 +422,34 @@ impl Manager {
         self.history.recent(limit, None)
     }
 
-    /// Ends every channel; used when the app quits.
-    pub fn shutdown(&self) {
+    /// Ends every channel; used when the app quits, restarts or installs an
+    /// update. Waits at most [`SHUTDOWN_GRACE`]; see [`Manager::shutdown_within`].
+    pub fn shutdown(&self) -> bool {
+        self.shutdown_within(SHUTDOWN_GRACE)
+    }
+
+    /// Asks every channel to end at once, then waits for all of them together
+    /// at most `grace`. A channel never needs the caller's thread to end, so
+    /// this is safe on the app's main thread; a channel that is not done in
+    /// time finishes on its own. Returns whether all ended in time. Calling it
+    /// again does nothing.
+    pub fn shutdown_within(&self, grace: Duration) -> bool {
         let sups: Vec<Supervisor> = self
             .inner
             .lock()
-            .unwrap()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .supervisors
             .drain()
             .map(|(_, s)| s)
             .collect();
-        for s in sups {
-            s.shutdown();
+        for s in &sups {
+            s.request_shutdown();
         }
+        let deadline = Instant::now() + grace;
+        let mut all = true;
+        for mut s in sups {
+            all &= s.wait_ended(deadline);
+        }
+        all
     }
 }

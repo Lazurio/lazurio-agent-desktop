@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use tungstenite::Message;
@@ -173,6 +173,8 @@ impl ChannelStatus {
 
 /// The device key's 32-byte seed, from the system key store, kept in memory only.
 pub type KeyProvider = Arc<dyn Fn() -> Result<Zeroizing<[u8; 32]>> + Send + Sync>;
+/// Called on the channel thread, also while it ends its session: it must
+/// return at once and never wait for another thread (see `notifier`).
 pub type StatusListener = Arc<dyn Fn(&str, &ChannelStatus) + Send + Sync>;
 
 /// Seconds a working state lasts after the last tool call finished.
@@ -188,6 +190,8 @@ struct Ctl {
     kill: bool,
     kick: bool,
     shutdown: bool,
+    /// The channel thread has returned: its session is closed and its engine ended.
+    ended: bool,
     status: ChannelStatus,
 }
 
@@ -196,6 +200,32 @@ struct Shared {
     cv: Condvar,
 }
 
+impl Shared {
+    /// The control block even after a channel thread panicked while holding
+    /// it, so that ending a channel never panics the thread that ends it.
+    fn ctl(&self) -> MutexGuard<'_, Ctl> {
+        self.ctl
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Marks the channel thread as ended when it returns, also after a panic.
+struct Ended(Arc<Shared>);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.0.ctl().ended = true;
+        self.0.cv.notify_all();
+    }
+}
+
+/// One Environment's channel thread.
+///
+/// Ending a channel never waits for its thread without a time limit: the
+/// thread may be in the middle of connecting (up to the connect timeout) or,
+/// in an app, waiting for something the waiting thread itself has to do.
+/// Dropping a supervisor only asks the channel to end.
 pub struct Supervisor {
     shared: Arc<Shared>,
     handle: Option<JoinHandle<()>>,
@@ -215,6 +245,7 @@ impl Supervisor {
                 kill: false,
                 kick: false,
                 shutdown: false,
+                ended: false,
                 status: ChannelStatus::new(State::Off),
             }),
             cv: Condvar::new(),
@@ -228,7 +259,10 @@ impl Supervisor {
         };
         let handle = std::thread::Builder::new()
             .name("lazurio-channel".into())
-            .spawn(move || worker.run())
+            .spawn(move || {
+                let _ended = Ended(worker.shared.clone());
+                worker.run();
+            })
             .expect("spawn channel thread");
         Self {
             shared,
@@ -257,25 +291,49 @@ impl Supervisor {
         self.shared.ctl.lock().unwrap().status.clone()
     }
 
-    pub fn shutdown(mut self) {
-        self.shutdown_inner();
+    /// Asks the channel to end for good: the session closes and the engine
+    /// ends with everything it started. Returns at once.
+    pub fn request_shutdown(&self) {
+        self.shared.ctl().shutdown = true;
+        self.shared.cv.notify_all();
     }
 
-    fn shutdown_inner(&mut self) {
-        {
-            let mut c = self.shared.ctl.lock().unwrap();
-            c.shutdown = true;
-            self.shared.cv.notify_all();
+    /// Waits until the channel thread has ended, but not past `deadline`, and
+    /// returns whether it ended. A thread that is still running is never
+    /// joined; it finishes on its own.
+    pub fn wait_ended(&mut self, deadline: Instant) -> bool {
+        let mut c = self.shared.ctl();
+        while !c.ended {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            c = self
+                .shared
+                .cv
+                .wait_timeout(c, deadline - now)
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .0;
         }
+        drop(c);
         if let Some(h) = self.handle.take() {
+            // The thread is past its work; this only collects it.
             let _ = h.join();
         }
+        true
+    }
+
+    /// Ends the channel and waits at most `timeout` for it. Returns whether
+    /// it ended in time.
+    pub fn shutdown(mut self, timeout: Duration) -> bool {
+        self.request_shutdown();
+        self.wait_ended(Instant::now() + timeout)
     }
 }
 
 impl Drop for Supervisor {
     fn drop(&mut self) {
-        self.shutdown_inner();
+        self.request_shutdown();
     }
 }
 

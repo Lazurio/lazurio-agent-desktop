@@ -3,7 +3,9 @@
 use lazurio_agent_desktop_core::app_tools::{text_result, AppTools, AppToolsHandle};
 use lazurio_agent_desktop_core::channel::{EngineSpec, State, Timing};
 use lazurio_agent_desktop_core::keystore::MemoryStore;
-use lazurio_agent_desktop_core::manager::{EnvironmentView, Manager, ManagerConfig};
+use lazurio_agent_desktop_core::manager::{
+    ChangeListener, EnvironmentView, Manager, ManagerConfig,
+};
 use lazurio_agent_desktop_testkit::{browse, wait_until, Approval, FakeEnvironment, FakeLaunchpad};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -79,6 +81,15 @@ impl Default for Setup {
 }
 
 pub fn open(data_dir: &Path, setup: Setup) -> (Arc<Manager>, Arc<MemoryStore>) {
+    open_with(data_dir, setup, Arc::new(|| {}))
+}
+
+/// Like [`open`], with the app's change listener.
+pub fn open_with(
+    data_dir: &Path,
+    setup: Setup,
+    on_change: ChangeListener,
+) -> (Arc<Manager>, Arc<MemoryStore>) {
     let store = Arc::new(MemoryStore::default());
     let manager = Manager::open(
         ManagerConfig {
@@ -91,7 +102,7 @@ pub fn open(data_dir: &Path, setup: Setup) -> (Arc<Manager>, Arc<MemoryStore>) {
             hold_after_last_call: setup.hold,
         },
         store.clone(),
-        Arc::new(|| {}),
+        on_change,
     )
     .unwrap();
     (manager, store)

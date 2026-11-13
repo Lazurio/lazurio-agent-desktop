@@ -112,7 +112,10 @@ the release workflow.
 **Turning it off.** Switch off (no connection), **Stop** (ends the current
 session), **Remove** (deletes the key here), and removing the computer in
 Lazurio (the Environment forgets its key). Quitting the app also ends every
-connection.
+connection and the engine with everything it started, whether the app is
+quit from its tray, its panel, an update or the system (Quit & Reopen, log
+out, shut down). Quitting waits at most two seconds for that and never for a
+connection that is still being made.
 
 **Local data.** `~/Library/Application Support/io.lazurio.agent-desktop`
 (macOS) or `%LOCALAPPDATA%\io.lazurio.agent-desktop` (Windows):

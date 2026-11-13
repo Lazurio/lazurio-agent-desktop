@@ -222,9 +222,14 @@ fn stop_all(app: AppHandle) {
     app.state::<AppState>().manager.stop_all();
 }
 
+/// Off the main thread: removing ends the Environment's channel first.
 #[tauri::command]
-fn remove_environment(app: AppHandle, id: String) -> CmdResult<()> {
-    Ok(app.state::<AppState>().manager.remove(&id)?)
+async fn remove_environment(app: AppHandle, id: String) -> CmdResult<()> {
+    let manager = app.state::<AppState>().manager.clone();
+    tauri::async_runtime::spawn_blocking(move || manager.remove(&id))
+        .await
+        .map_err(other)??;
+    Ok(())
 }
 
 /// The page in Lazurio that lists this computer and can remove it there.
@@ -301,10 +306,21 @@ async fn check_update(app: AppHandle) -> CmdResult<Option<String>> {
     updates::check(&app).await.map_err(other)
 }
 
+/// The panel's Quit. The channels end in `RunEvent::ExitRequested`.
 #[tauri::command]
 fn quit(app: AppHandle) {
-    app.state::<AppState>().manager.shutdown();
     app.exit(0);
+}
+
+/// Ends every channel and its engine before the app goes. Runs on the main
+/// thread and waits there at most `SHUTDOWN_GRACE`: a channel never needs the
+/// main thread to end (the core tells the app about changes from a thread of
+/// its own, and the app never waits for its main thread there), so quitting
+/// cannot hang. Calling it again does nothing.
+fn end_channels(app: &AppHandle) {
+    if let Some(st) = app.try_state::<AppState>() {
+        st.manager.shutdown();
+    }
 }
 
 fn czech() -> bool {
@@ -428,10 +444,8 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_panel(app),
             "stop_all" => app.state::<AppState>().manager.stop_all(),
-            "quit" => {
-                app.state::<AppState>().manager.shutdown();
-                app.exit(0);
-            }
+            // The channels end in `RunEvent::ExitRequested`.
+            "quit" => app.exit(0),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -482,7 +496,10 @@ fn main() {
                 Arc::from(keystore::system_store(data_dir.join("keys"))),
                 Arc::new(move || {
                     let _ = handle.emit("changed", ());
-                    update_tray(&handle);
+                    // Hand the tray to the main thread, never wait for it: the
+                    // main thread may be quitting and waiting for the channels.
+                    let tray_app = handle.clone();
+                    let _ = handle.run_on_main_thread(move || update_tray(&tray_app));
                 }),
             )?;
             let settings_path = data_dir.join("settings.json");
@@ -547,14 +564,17 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the app")
-        .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
-                // Closing the last window must not quit a tray app.
-                if code.is_none() {
-                    api.prevent_exit();
-                } else if let Some(st) = app.try_state::<AppState>() {
-                    st.manager.shutdown();
-                }
-            }
+        .run(|app, event| match event {
+            // Closing the last window must not quit a tray app.
+            tauri::RunEvent::ExitRequested {
+                api, code: None, ..
+            } => api.prevent_exit(),
+            // Quit from the tray or the panel, the restart after an update.
+            tauri::RunEvent::ExitRequested { .. } => end_channels(app),
+            // macOS ends the app only this way when the system asks (Quit &
+            // Reopen after granting a permission, log out, shut down), and
+            // Windows when it shuts down: no ExitRequested comes first.
+            tauri::RunEvent::Exit => end_channels(app),
+            _ => {}
         });
 }

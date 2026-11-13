@@ -218,8 +218,11 @@ pub async fn install(app: AppHandle) -> Result<(), String> {
         }
     };
     // From here on the old version stops: end the channels cleanly first.
-    // Each channel ends its engine with everything the engine started.
-    app.state::<AppState>().manager.shutdown();
+    // Each channel ends its engine with everything the engine started. The
+    // wait is bounded (SHUTDOWN_GRACE) and stays off the async workers; on
+    // Windows whatever is still running goes below.
+    let manager = app.state::<AppState>().manager.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || manager.shutdown()).await;
     // Windows cannot replace a running .exe, and the NSIS installer aborts
     // when it meets one. Whatever still runs from this installation (except
     // this process, which the updater ends itself) goes now.
