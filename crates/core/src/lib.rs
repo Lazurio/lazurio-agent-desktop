@@ -10,6 +10,7 @@
 
 pub mod app_tools;
 pub mod channel;
+pub mod channel_url;
 pub mod error;
 pub mod history;
 pub mod keys;

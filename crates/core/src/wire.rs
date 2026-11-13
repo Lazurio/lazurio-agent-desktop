@@ -18,9 +18,9 @@ use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tungstenite::{Message, WebSocket};
-use url::{Host, Url};
+use url::Url;
 
-pub const ATTACH_PATH: &str = "/.lazurio/computers/attach";
+pub use crate::channel_url::{derive_channel_url, validate_channel_url, ATTACH_PATH};
 /// First line of the signed bytes; the version of the attach handshake.
 pub const SIGNING_CONTEXT: &str = "lazurio-computer-attach-v1";
 
@@ -83,57 +83,6 @@ pub enum WireError {
     Protocol(String),
 }
 
-fn is_loopback(url: &Url) -> bool {
-    match url.host() {
-        Some(Host::Domain(d)) => d == "localhost",
-        Some(Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    }
-}
-
-/// The channel URL for an Environment whose pairing result had none (v0):
-/// the Launchpad's host with the attach path.
-pub fn derive_channel_url(launchpad_origin: &str) -> Option<String> {
-    let mut url = Url::parse(launchpad_origin).ok()?;
-    let scheme = match url.scheme() {
-        "https" => "wss",
-        "http" if is_loopback(&url) => "ws",
-        _ => return None,
-    };
-    url.set_scheme(scheme).ok()?;
-    url.set_path(ATTACH_PATH);
-    url.set_query(None);
-    Some(url.to_string())
-}
-
-/// Checks the `channel.url` of a pairing result: `wss` (plain `ws` only for
-/// loopback test servers), the Launchpad's own host, the attach path, and no
-/// credentials, query or fragment.
-pub fn validate_channel_url(raw: &str, launchpad_origin: &str) -> Result<String, String> {
-    let url = Url::parse(raw).map_err(|e| e.to_string())?;
-    let launchpad = Url::parse(launchpad_origin).map_err(|e| e.to_string())?;
-    match url.scheme() {
-        "wss" => {}
-        "ws" if is_loopback(&url) => {}
-        other => return Err(format!("scheme {other} is not allowed")),
-    }
-    if url.host_str() != launchpad.host_str() {
-        return Err("the channel is not on the Launchpad's host".into());
-    }
-    if url.path() != ATTACH_PATH {
-        return Err("unexpected channel path".into());
-    }
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err("unexpected parts in the channel URL".into());
-    }
-    Ok(url.to_string())
-}
-
 fn tls_config() -> Arc<ClientConfig> {
     static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
     CONFIG
@@ -189,15 +138,17 @@ pub fn connect(url: &Url, timeout: Duration) -> Result<Socket, WireError> {
         .to_string();
     let tls = match url.scheme() {
         "wss" => true,
-        "ws" if is_loopback(url) => false,
+        "ws" if crate::channel_url::plain_allowed(url) => false,
         other => return Err(WireError::Protocol(format!("scheme {other}"))),
     };
     let port = url
         .port_or_known_default()
         .unwrap_or(if tls { 443 } else { 80 });
+    // Plain ws must not leave the computer, whatever `localhost` resolves to.
     let addrs: Vec<_> = (host.as_str(), port)
         .to_socket_addrs()
         .map_err(|e| WireError::Offline(e.to_string()))?
+        .filter(|a| tls || a.ip().is_loopback())
         .collect();
     let mut last = WireError::Offline("no address".into());
     let mut tcp = None;
@@ -355,30 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_and_validates_channel_urls() {
-        assert_eq!(
-            derive_channel_url("https://launchpad.acme.example.com").unwrap(),
-            "wss://launchpad.acme.example.com/.lazurio/computers/attach"
-        );
-        assert_eq!(
-            derive_channel_url("http://127.0.0.1:8123").unwrap(),
-            "ws://127.0.0.1:8123/.lazurio/computers/attach"
-        );
-        let lp = "https://launchpad.acme.example.com";
-        assert!(validate_channel_url(
-            "wss://launchpad.acme.example.com/.lazurio/computers/attach",
-            lp
-        )
-        .is_ok());
-        for bad in [
-            "ws://launchpad.acme.example.com/.lazurio/computers/attach",
-            "wss://evil.example.com/.lazurio/computers/attach",
-            "wss://launchpad.acme.example.com/other",
-            "wss://u:p@launchpad.acme.example.com/.lazurio/computers/attach",
-            "wss://launchpad.acme.example.com/.lazurio/computers/attach?x=1",
-        ] {
-            assert!(validate_channel_url(bad, lp).is_err(), "{bad}");
-        }
+    fn adds_the_device_to_the_attach_url() {
         let url = attach_url(
             "wss://launchpad.acme.example.com/.lazurio/computers/attach",
             "office-mac",
