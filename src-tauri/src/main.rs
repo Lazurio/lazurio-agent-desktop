@@ -205,6 +205,13 @@ fn set_enabled(app: AppHandle, id: String, enabled: bool) -> CmdResult<()> {
     Ok(app.state::<AppState>().manager.set_enabled(&id, enabled)?)
 }
 
+/// "Commands on this computer" for one Environment; the panel asks the
+/// owner to confirm before turning it on.
+#[tauri::command]
+fn set_commands(app: AppHandle, id: String, enabled: bool) -> CmdResult<()> {
+    Ok(app.state::<AppState>().manager.set_commands(&id, enabled)?)
+}
+
 #[tauri::command]
 fn stop(app: AppHandle, id: String) -> CmdResult<()> {
     Ok(app.state::<AppState>().manager.stop(&id)?)
@@ -524,6 +531,7 @@ fn main() {
             wait_pairing,
             cancel_pairing,
             set_enabled,
+            set_commands,
             stop,
             stop_all,
             remove_environment,

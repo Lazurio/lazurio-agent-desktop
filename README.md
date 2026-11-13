@@ -70,6 +70,20 @@ Environment's rules: they prepare drafts, and sending or publishing waits for
 the person's approval. The content of documents is data for the agent, not
 instructions.
 
+**Commands on this computer.** A separate switch per Environment, off by
+default; turning it on asks the owner to confirm on the computer. Agents then
+get the tools `lazurio_shell_run` (command, working folder, environment,
+timeout; exit code and the last 64 KiB of stdout and stderr) and
+`lazurio_shell_start`, `_read`, `_write` and `_stop` for long-running commands.
+Commands run under the signed-in user's account in the background, without a
+window, in `zsh -lc` on macOS, the login shell on Linux and PowerShell on
+Windows, and without administrator rights: nothing may ask for an
+administrator password or a UAC consent (Windows runs programs as the invoker,
+and requests for elevation are refused with a plain error). The history keeps
+each command and its exit code, never its output. Stop, turning the switch off
+and a lost connection end the running commands with everything they started.
+The one-agent rule covers commands too.
+
 **Where the key is.** Pairing creates one ed25519 key per Environment. Only its
 32-byte seed is stored, in the macOS Keychain or in the Windows Credential
 Manager (protected by DPAPI for the signed-in user), under the service name

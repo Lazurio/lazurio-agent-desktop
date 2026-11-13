@@ -31,6 +31,7 @@ let view = null;
 let pairing = false;
 // Inline confirmations: native confirm() is not reliable in every webview.
 let confirmRemove = null;
+let confirmCommands = null;
 let confirmQuit = false;
 
 // Static texts and "?" toggles.
@@ -61,7 +62,7 @@ function statusLine(env) {
       if (env.controlledBy) detail = t("controlled_by", { env: env.controlledBy });
       break;
     case "working": {
-      dot = "busy"; text = t("state_working");
+      dot = "busy"; text = t((s.tool || "").startsWith("lazurio_shell_") ? "state_commands" : "state_working");
       const app = s.app ? t("working_in", { app: s.app }) : "";
       detail = t("working_detail", { tool: s.tool || "", app, since: timeFmt.format(new Date(s.sinceMs)) });
       break;
@@ -100,6 +101,37 @@ function renderEnvironments() {
         el("div", { class: "card-title" }, el("strong", {}, env.label), el("small", {}, env.launchpad.replace(/^https?:\/\//, ""))),
         el("label", { class: "switch" }, toggle, el("span"))),
       statusLine(env),
+      el("div", { class: "subswitch" },
+        el("span", {}, t("commandsLabel")),
+        el("label", { class: "switch small" },
+          (() => {
+            const box = el("input", {
+              type: "checkbox", role: "switch", "aria-label": `${t("commandsLabel")}: ${env.label}`,
+              onchange: async (e) => {
+                if (e.target.checked) {
+                  e.target.checked = false;
+                  confirmCommands = env.id;
+                  renderEnvironments();
+                  return;
+                }
+                e.target.disabled = true;
+                try { await invoke("set_commands", { id: env.id, enabled: false }); } finally { refresh(); }
+              },
+            });
+            box.checked = env.commands;
+            return box;
+          })(),
+          el("span"))),
+      confirmCommands === env.id
+        ? el("div", { class: "confirm" },
+          el("p", { class: "note" }, t("commandsConfirm", { name: env.label })),
+          el("div", { class: "actions" },
+            el("button", {
+              class: "stop",
+              onclick: async () => { confirmCommands = null; await invoke("set_commands", { id: env.id, enabled: true }); refresh(); },
+            }, t("commandsAllow")),
+            el("button", { class: "link", onclick: () => { confirmCommands = null; renderEnvironments(); } }, t("cancel"))))
+        : null,
       el("div", { class: "actions" },
         active ? el("button", { class: "stop", onclick: () => invoke("stop", { id: env.id }).then(refresh) }, t("stop")) : null,
         el("button", { class: "link", onclick: () => invoke("open_launchpad", { id: env.id }) }, t("manage")),
@@ -143,6 +175,7 @@ async function renderHistory() {
   for (const e of entries) {
     let text;
     if (e.event === "tool") text = t(e.ok ? "ev_tool_ok" : "ev_tool_err", { tool: e.tool, ms: e.ms ?? 0 });
+    else if (e.event === "command") text = t("ev_command", { command: e.command, code: e.exit_code ?? "–" });
     else text = t(`ev_${e.event}`);
     if (e.event === "disconnected" && e.reason) text += ` · ${t(`reason_${e.reason}`)}`;
     const who = labels[e.env] || t("removedEnv");

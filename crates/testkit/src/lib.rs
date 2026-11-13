@@ -193,6 +193,8 @@ pub struct EnvOptions {
     pub deny: Option<String>,
     /// After `ready`, stops reading the socket: no pongs, no MCP.
     pub silent_after_ready: bool,
+    /// Runs this through `lazurio_shell_run` when the computer lists it.
+    pub shell_command: Option<String>,
 }
 
 impl Default for EnvOptions {
@@ -205,6 +207,7 @@ impl Default for EnvOptions {
             fixed_nonce: None,
             deny: None,
             silent_after_ready: false,
+            shell_command: None,
         }
     }
 }
@@ -474,7 +477,22 @@ fn play_agent(ws: &mut WebSocket<TcpStream>, state: &EnvState) {
         json!({"jsonrpc": "2.0", "id": "c2", "method": "tools/call", "params": {
         "name": "desktop_fail", "arguments": {}}}),
     );
+    let shell = match &state.options.shell_command {
+        Some(command) if names.iter().any(|n| n == "lazurio_shell_run") => {
+            let r = call(
+                ws,
+                json!({"jsonrpc": "2.0", "id": "x1", "method": "tools/call", "params": {
+                "name": "lazurio_shell_run", "arguments": {"command": command, "timeout_s": 30}}}),
+            );
+            r["result"]["content"][0]["text"]
+                .as_str()
+                .and_then(|t| serde_json::from_str::<Value>(t).ok())
+                .unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
+    };
     let summary = json!({
+        "shell": shell,
         "server": init["result"]["serverInfo"]["name"],
         "app_meta": init["result"]["_meta"]["io.lazurio/agent-desktop"],
         "ping": ping["result"].is_object(),

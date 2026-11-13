@@ -5,7 +5,7 @@ default-members = ["crates/core", "crates/testkit"]
 resolver        = "2"
 
 [workspace.package]
-version      = "0.1.0-pilot.4"
+version      = "0.1.0-pilot.5"
 edition      = "2021"
 rust-version = "1.85"
 publish      = false

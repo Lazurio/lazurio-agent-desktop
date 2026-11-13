@@ -14,7 +14,7 @@ use rand_core::{OsRng, RngCore};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -44,6 +44,8 @@ pub struct EnvironmentView {
     pub enabled: bool,
     /// Another Environment's name while its agent has the computer.
     pub controlled_by: Option<String>,
+    /// "Commands on this computer" is on for this Environment.
+    pub commands: bool,
     pub paired_at: String,
     pub key_fingerprint: String,
     pub status: ChannelStatus,
@@ -63,6 +65,8 @@ pub type ChangeListener = Arc<dyn Fn() + Send + Sync>;
 struct Inner {
     records: Vec<EnvironmentRecord>,
     supervisors: HashMap<String, Supervisor>,
+    /// The live "commands" switch each channel reads.
+    commands: HashMap<String, Arc<AtomicBool>>,
 }
 
 pub struct Manager {
@@ -114,14 +118,17 @@ impl Manager {
             inner: Mutex::new(Inner {
                 records: Vec::new(),
                 supervisors: HashMap::new(),
+                commands: HashMap::new(),
             }),
             cfg,
         });
         {
             let mut inner = manager.inner.lock().unwrap();
             for rec in &records {
-                let sup = manager.spawn_supervisor(rec);
+                let flag = Arc::new(AtomicBool::new(rec.commands));
+                let sup = manager.spawn_supervisor(rec, flag.clone());
                 inner.supervisors.insert(rec.id.clone(), sup);
+                inner.commands.insert(rec.id.clone(), flag);
             }
             inner.records = records;
         }
@@ -132,7 +139,7 @@ impl Manager {
         &self.history
     }
 
-    fn spawn_supervisor(&self, rec: &EnvironmentRecord) -> Supervisor {
+    fn spawn_supervisor(&self, rec: &EnvironmentRecord, commands: Arc<AtomicBool>) -> Supervisor {
         let keystore = self.keystore.clone();
         let acct = account(&rec.id);
         let key: KeyProvider = Arc::new(move || {
@@ -155,6 +162,7 @@ impl Manager {
             engine: self.cfg.engine.clone(),
             app_tools: self.cfg.app_tools.clone(),
             lock: self.lock.clone(),
+            commands,
             timing: self.cfg.timing,
         };
         Supervisor::spawn(cfg, key, self.history.clone(), listener, rec.enabled)
@@ -185,6 +193,7 @@ impl Manager {
                     .as_ref()
                     .filter(|h| h.env_id != r.id)
                     .map(|h| h.label.clone()),
+                commands: r.commands,
                 paired_at: r.paired_at.clone(),
                 key_fingerprint: r.key_fingerprint.clone(),
                 status: inner
@@ -250,6 +259,7 @@ impl Manager {
             device_id: result.device_id,
             channel_url: result.channel_url,
             enabled: true,
+            commands: false,
             paired_at: time::today(),
             key_fingerprint: fingerprint,
         };
@@ -266,11 +276,13 @@ impl Manager {
         for old in replaced {
             let _ = self.remove(&old);
         }
-        let sup = self.spawn_supervisor(&rec);
+        let flag = Arc::new(AtomicBool::new(false));
+        let sup = self.spawn_supervisor(&rec, flag.clone());
         {
             let mut inner = self.inner.lock().unwrap();
             inner.records.push(rec.clone());
             inner.supervisors.insert(id.clone(), sup);
+            inner.commands.insert(id.clone(), flag);
             self.store.save(&inner.records)?;
         }
         self.history.record(&id, Event::Paired);
@@ -304,6 +316,37 @@ impl Manager {
                 Event::SwitchedOn
             } else {
                 Event::SwitchedOff
+            },
+        );
+        (self.on_change)();
+        Ok(())
+    }
+
+    /// The owner's "commands on this computer" switch for one Environment.
+    /// Turning it off ends the agent's running commands at once.
+    pub fn set_commands(&self, id: &str, enabled: bool) -> Result<()> {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            let rec = inner
+                .records
+                .iter_mut()
+                .find(|r| r.id == id)
+                .ok_or_else(|| Error::UnknownEnvironment(id.into()))?;
+            if rec.commands == enabled {
+                return Ok(());
+            }
+            rec.commands = enabled;
+            self.store.save(&inner.records)?;
+            if let Some(flag) = inner.commands.get(id) {
+                flag.store(enabled, Ordering::SeqCst);
+            }
+        }
+        self.history.record(
+            id,
+            if enabled {
+                Event::CommandsOn
+            } else {
+                Event::CommandsOff
             },
         );
         (self.on_change)();
@@ -349,6 +392,7 @@ impl Manager {
                 return Err(Error::UnknownEnvironment(id.into()));
             }
             self.store.save(&inner.records)?;
+            inner.commands.remove(id);
             inner.supervisors.remove(id)
         };
         if let Some(s) = sup {

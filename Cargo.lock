@@ -2339,7 +2339,7 @@ dependencies = [
 
 [[package]]
 name = "lazurio-agent-desktop"
-version = "0.1.0-pilot.4"
+version = "0.1.0-pilot.5"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
@@ -2360,13 +2360,14 @@ dependencies = [
 
 [[package]]
 name = "lazurio-agent-desktop-core"
-version = "0.1.0-pilot.4"
+version = "0.1.0-pilot.5"
 dependencies = [
  "base64 0.22.1",
  "core-foundation 0.10.1",
  "ed25519-dalek",
  "gethostname",
  "keyring",
+ "libc",
  "os_info",
  "rand_core 0.6.4",
  "rustls",
@@ -2385,7 +2386,7 @@ dependencies = [
 
 [[package]]
 name = "lazurio-agent-desktop-testkit"
-version = "0.1.0-pilot.4"
+version = "0.1.0-pilot.5"
 dependencies = [
  "base64 0.22.1",
  "ed25519-dalek",

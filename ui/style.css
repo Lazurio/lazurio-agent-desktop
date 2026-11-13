@@ -75,6 +75,8 @@ button { font: inherit; color: inherit; cursor: pointer; }
 .dot.connecting { background: var(--muted); }
 .dot.problem { background: var(--problem); }
 
+.subswitch { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; font-size: 13px; color: var(--muted); }
+.switch.small { transform: scale(0.8); transform-origin: right center; }
 .actions { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 10px; }
 .stop {
   background: var(--accent); color: var(--bg); border: 0; border-radius: 6px; padding: 4px 12px; font-weight: 600;

@@ -18,7 +18,8 @@ use crate::lock::{busy_message, ComputerLock};
 use crate::mcp_tap::{Tap, TapEvent};
 use crate::platform::hide_console;
 use crate::process_tree::ProcessTree;
-use crate::time::{now_ms, rfc3339};
+use crate::shell::{is_shell_tool, Shell};
+use crate::time::now_ms;
 use crate::wire::{self, Socket, WireError};
 use crate::Result;
 use rand_core::{OsRng, RngCore};
@@ -26,6 +27,7 @@ use serde::Serialize;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
@@ -72,6 +74,8 @@ pub struct ChannelConfig {
     pub app_tools: Option<AppToolsHandle>,
     /// One agent at a time across all Environments.
     pub lock: Arc<ComputerLock>,
+    /// "Commands on this computer" for this Environment (contract v1, section 3).
+    pub commands: Arc<AtomicBool>,
     pub timing: Timing,
 }
 
@@ -448,14 +452,25 @@ impl Worker {
 
         let (tx, rx) = mpsc::channel::<Msg>();
         let tap = Arc::new(Mutex::new(Tap::default()));
-        let router = Arc::new(Router::with_lock(
-            self.cfg.app_tools.as_ref().map(|h| h.0.clone()),
-            LockSeat {
-                lock: self.cfg.lock.clone(),
-                env_id: self.cfg.env_id.clone(),
-                label: self.cfg.env_label.clone(),
-            },
+        let router = Arc::new(
+            Router::with_lock(
+                self.cfg.app_tools.as_ref().map(|h| h.0.clone()),
+                LockSeat {
+                    lock: self.cfg.lock.clone(),
+                    env_id: self.cfg.env_id.clone(),
+                    label: self.cfg.env_label.clone(),
+                },
+            )
+            .with_shell(self.cfg.commands.clone()),
+        );
+        let shell = Arc::new(Shell::new(
+            self.cfg.commands.clone(),
+            self.history.clone(),
+            self.cfg.env_id.clone(),
+            self.cfg.lock.clone(),
+            self.cfg.env_label.clone(),
         ));
+        let mut commands_listed = self.cfg.commands.load(Ordering::SeqCst);
         let mut threads = Vec::new();
         // To the engine: its own writer, so a slow engine never stalls the socket.
         let (to_engine, engine_inbox) = mpsc::channel::<Vec<u8>>();
@@ -554,7 +569,9 @@ impl Worker {
                             name,
                             arguments,
                         } => {
-                            if let Some(tools) = router.tools().cloned() {
+                            let app_tools = router.tools().cloned();
+                            let shell = shell.clone();
+                            if app_tools.is_some() || is_shell_tool(&name) {
                                 let tx = tx.clone();
                                 // Its own thread: an update check may take a while
                                 // and the Environment's pings must keep flowing.
@@ -565,7 +582,11 @@ impl Worker {
                                         tool: name.clone(),
                                         app,
                                     }));
-                                    let result = tools.call(&name, &arguments);
+                                    let result = if is_shell_tool(&name) {
+                                        shell.call(&name, &arguments)
+                                    } else {
+                                        app_tools.expect("checked above").call(&name, &arguments)
+                                    };
                                     let ok = !result["isError"].as_bool().unwrap_or(false);
                                     let answer = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
                                     let _ = tx.send(Msg::Out(answer.to_string()));
@@ -595,6 +616,20 @@ impl Worker {
                 }
             }
 
+            // The owner switched commands on or off: the agent's tool list changed.
+            let listed = self.cfg.commands.load(Ordering::SeqCst);
+            if listed != commands_listed {
+                commands_listed = listed;
+                if !listed {
+                    shell.end_all();
+                }
+                let note = r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
+                if socket.send(Message::text(note)).is_err() {
+                    ended_by = Some(Reason::Offline);
+                    break;
+                }
+            }
+
             // Keep-alive.
             if last_heard.elapsed() >= timing.dead_after {
                 ended_by = Some(Reason::Offline);
@@ -609,7 +644,7 @@ impl Worker {
             }
 
             if initialized {
-                let busy = tap.lock().unwrap().pending() > 0;
+                let busy = tap.lock().unwrap().pending() > 0 || shell.busy();
                 let lingering = last_activity.is_some_and(|t| t.elapsed() < WORKING_LINGER);
                 if busy || lingering {
                     let (tool, app) = current_tool.clone().unzip();
@@ -636,6 +671,8 @@ impl Worker {
             }
         }
 
+        // Stop, switch off or a lost connection end the agent's commands too.
+        shell.end_all();
         let _ = socket.close(None);
         let _ = flush_close(&mut socket);
         drop(to_engine);
@@ -674,13 +711,10 @@ impl Worker {
             self.cfg.lock.end_call(&self.cfg.env_id);
         }
         self.history.append(HistoryEntry {
-            ts: rfc3339(now_ms()),
-            env: self.cfg.env_id.clone(),
-            event: Event::Tool,
             tool: Some(tool),
             ok: Some(ok),
             ms: Some(ms),
-            reason: None,
+            ..HistoryEntry::new(&self.cfg.env_id, Event::Tool)
         });
     }
 }

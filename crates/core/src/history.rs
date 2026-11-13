@@ -26,6 +26,11 @@ pub struct HistoryEntry {
     /// A reason code from a fixed vocabulary, see [`crate::channel::Reason`].
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub reason: Option<String>,
+    /// A command an agent ran (contract v1, section 3); never its output.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub exit_code: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +44,11 @@ pub enum Event {
     Disconnected,
     Stopped,
     Tool,
+    /// An agent's command finished or was ended.
+    Command,
+    /// The "commands on this computer" switch.
+    CommandsOn,
+    CommandsOff,
 }
 
 impl HistoryEntry {
@@ -51,6 +61,8 @@ impl HistoryEntry {
             ok: None,
             ms: None,
             reason: None,
+            command: None,
+            exit_code: None,
         }
     }
 }
@@ -145,7 +157,7 @@ mod tests {
             tool: Some("desktop_click".into()),
             ok: Some(true),
             ms: Some(12),
-            reason: None,
+            ..HistoryEntry::new("b", Event::Tool)
         });
         h.record("a", Event::Disconnected);
         let all = h.recent(10, None);

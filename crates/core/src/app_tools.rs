@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Key of the app's details in the `initialize` result's `_meta`.
@@ -94,9 +95,22 @@ pub(crate) struct Router {
     list_ids: Mutex<HashSet<String>>,
     init_ids: Mutex<HashSet<String>>,
     seat: Option<LockSeat>,
+    /// The "commands on this computer" switch of this Environment.
+    shell: Option<Arc<AtomicBool>>,
 }
 
 impl Router {
+    /// Also serves the `lazurio_shell_*` tools, listed while `enabled` is on.
+    pub(crate) fn with_shell(mut self, enabled: Arc<AtomicBool>) -> Self {
+        self.shell = Some(enabled);
+        self
+    }
+
+    fn shell_listed(&self) -> bool {
+        self.shell
+            .as_ref()
+            .is_some_and(|s| s.load(Ordering::SeqCst))
+    }
     pub(crate) fn with_lock(tools: Option<Arc<dyn AppTools>>, seat: LockSeat) -> Self {
         Self {
             seat: Some(seat),
@@ -120,6 +134,7 @@ impl Router {
             list_ids: Mutex::new(HashSet::new()),
             init_ids: Mutex::new(HashSet::new()),
             seat: None,
+            shell: None,
         }
     }
 
@@ -145,7 +160,7 @@ impl Router {
     }
 
     pub(crate) fn route_environment_line(&self, line: &[u8]) -> Route {
-        if self.tools.is_none() && self.seat.is_none() {
+        if self.tools.is_none() && self.seat.is_none() && self.shell.is_none() {
             return Route::Engine;
         }
         let Ok(msg) = serde_json::from_slice::<Incoming>(line) else {
@@ -170,7 +185,11 @@ impl Router {
                 if let Err(holder) = self.take_lock(name.as_deref()) {
                     return Route::Refuse { id, holder };
                 }
-                if let Some(name) = name.filter(|n| self.names.contains(n)) {
+                let local = |n: &String| {
+                    self.names.contains(n)
+                        || (self.shell.is_some() && crate::shell::is_shell_tool(n))
+                };
+                if let Some(name) = name.filter(local) {
                     let arguments = params
                         .and_then(|p| p.arguments)
                         .unwrap_or_else(|| json!({}));
@@ -188,9 +207,9 @@ impl Router {
 
     /// A line from the engine, with the app's additions where they belong.
     pub(crate) fn rewrite_engine_line<'a>(&self, line: &'a [u8]) -> Cow<'a, [u8]> {
-        let Some(tools) = &self.tools else {
+        if self.tools.is_none() && self.shell.is_none() {
             return Cow::Borrowed(line);
-        };
+        }
         let (listing, initializing) = (
             !self.list_ids.lock().unwrap().is_empty(),
             !self.init_ids.lock().unwrap().is_empty(),
@@ -218,9 +237,14 @@ impl Router {
         };
         if is_list {
             if let Some(list) = result.get_mut("tools").and_then(Value::as_array_mut) {
-                list.extend(tools.definitions());
+                if let Some(tools) = &self.tools {
+                    list.extend(tools.definitions());
+                }
+                if self.shell_listed() {
+                    list.extend(crate::shell::definitions());
+                }
             }
-        } else {
+        } else if let Some(tools) = &self.tools {
             let meta = result.entry("_meta").or_insert_with(|| json!({}));
             if let Some(meta) = meta.as_object_mut() {
                 meta.insert(META_KEY.to_string(), tools.about());

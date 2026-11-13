@@ -19,6 +19,10 @@ pub struct EnvironmentRecord {
     pub channel_url: String,
     /// The owner's switch.
     pub enabled: bool,
+    /// "Commands on this computer" for this Environment; off until the owner
+    /// turns it on here.
+    #[serde(default)]
+    pub commands: bool,
     pub paired_at: String,
     pub key_fingerprint: String,
 }

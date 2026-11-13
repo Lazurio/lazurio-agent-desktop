@@ -21,6 +21,7 @@ pub mod mcp_tap;
 pub mod pairing;
 pub mod platform;
 pub mod process_tree;
+pub mod shell;
 pub mod store;
 mod time;
 pub mod wire;
