@@ -171,6 +171,13 @@ jobs:
           gh release download v0.1.0-pilot.1 --repo "${{ github.repository }}" --pattern "*x64-setup.exe" --output $old --clobber
           $oldArg = if (Test-Path $old) { $old } else { "" }
           ./scripts/windows-update-test.ps1 -NewInstaller $new.FullName -BuildDir (Resolve-Path "target/${{ matrix.target }}/release").Path -OldInstaller $oldArg
+      - name: Screens of the update test (Windows)
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-update-test-screens
+          path: ${{ runner.temp }}/update-test-*.png
+          if-no-files-found: ignore
       - name: The bundled engine answers MCP initialize
         shell: bash
         run: |

@@ -597,6 +597,21 @@ impl Worker {
         for t in threads {
             let _ = t.join();
         }
+        // Tool calls that finished just before the session ended still belong
+        // in the history.
+        while let Ok(msg) = rx.try_recv() {
+            if let Msg::Tap(TapEvent::ToolFinished { tool, ok, ms }) = msg {
+                self.history.append(HistoryEntry {
+                    ts: rfc3339(now_ms()),
+                    env: self.cfg.env_id.clone(),
+                    event: Event::Tool,
+                    tool: Some(tool),
+                    ok: Some(ok),
+                    ms: Some(ms),
+                    reason: None,
+                });
+            }
+        }
         let stderr = String::from_utf8_lossy(&stderr_tail.lock().unwrap()).to_string();
         let reason = ended_by.unwrap_or_else(|| classify(&stderr, initialized, ssh_status));
         if initialized {

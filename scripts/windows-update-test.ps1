@@ -25,9 +25,24 @@ $App = Join-Path $InstallDir "lazurio-agent-desktop.exe"
 $Engine = Join-Path $InstallDir "agent-desktop.exe"
 $TaskName = "LazurioAgentDesktopUpdateTest"
 
-function Run-Installer([string]$Installer, [string[]]$Arguments, [int]$TimeoutSeconds) {
+function Save-Screen([string]$Name) {
+    try {
+        Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+        $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+        $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
+        $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+        $graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bitmap.Size)
+        $path = Join-Path $env:RUNNER_TEMP "update-test-$Name.png"
+        $bitmap.Save($path)
+        Write-Host "screenshot: $path"
+    } catch { Write-Host "no screenshot: $_" }
+    Get-Process | Where-Object { $_.MainWindowTitle } | ForEach-Object { Write-Host "window: $($_.Name): $($_.MainWindowTitle)" }
+}
+
+function Run-Installer([string]$Installer, [string[]]$Arguments, [int]$TimeoutSeconds, [string]$Name) {
     $p = Start-Process -FilePath $Installer -ArgumentList $Arguments -PassThru
     if (-not $p.WaitForExit($TimeoutSeconds * 1000)) {
+        Save-Screen $Name
         Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
         return "hung"
     }
@@ -74,7 +89,7 @@ function Hash([string]$Path) { (Get-FileHash -Algorithm SHA256 $Path).Hash }
 
 # 1. Old installation.
 $first = if ($OldInstaller) { $OldInstaller } else { $NewInstaller }
-$code = Run-Installer $first @("/S") 300
+$code = Run-Installer $first @("/S") 300 "first-install"
 if ($code -ne 0) { throw "first install failed: $code" }
 if (-not (Test-Path $Engine)) { throw "no engine at $Engine" }
 Get-Process -Name "lazurio-agent-desktop" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -84,17 +99,19 @@ $engineProcess = Start-Engine
 $fromTask = Start-AppFromTask
 Write-Host "running from the installation: $((Installed-Processes | ForEach-Object { $_.Name }) -join ', ')"
 
-# 3. The pilot computer's situation: an update without the hook.
+# 3. The pilot computer's situation: the installer without the hook, run as
+#    the updater runs it, over the running engine. Expected to stop.
 if ($OldInstaller) {
-    $oldHash = Hash $Engine
-    $code = Run-Installer $OldInstaller @("/S", "/UPDATE") 180
+    $code = Run-Installer $OldInstaller @("/P", "/UPDATE", "/R", "/ARGS", "--at-login") 90 "old-installer"
     $stillRunning = -not $engineProcess.HasExited
-    Write-Host "old installer (no hook) over the running engine: exit $code, engine still running: $stillRunning"
+    Write-Host "old installer (no hook) /P /UPDATE over the running engine: exit $code, engine still running: $stillRunning"
+    Get-Process -Name "lazurio-agent-desktop" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     if ($engineProcess.HasExited) { $engineProcess = Start-Engine }
+    $fromTask = Start-AppFromTask
 }
 
 # 4. The new installer, exactly as the updater runs it.
-$code = Run-Installer $NewInstaller @("/P", "/UPDATE", "/R", "/ARGS", "--at-login") 300
+$code = Run-Installer $NewInstaller @("/P", "/UPDATE", "/R", "/ARGS", "--at-login") 300 "new-installer"
 Write-Host "new installer /P /UPDATE /R over the running installation: exit $code"
 if ("$code" -ne "0") { throw "the update over a running installation did not complete (exit $code)" }
 if (-not $engineProcess.HasExited) { throw "the running engine survived the update" }

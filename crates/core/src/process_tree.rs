@@ -271,17 +271,29 @@ mod tests {
         assert!(child.wait().is_ok());
     }
 
+    /// Runs as the leftover in the test below (a copy of this test binary).
+    #[test]
+    #[ignore]
+    fn sleeper() {
+        std::thread::sleep(Duration::from_secs(120));
+    }
+
     #[test]
     fn ends_leftovers_of_a_folder_but_not_itself() {
         let dir = std::env::temp_dir().join(format!("lad-tree-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let ping = dir.join("leftover.exe");
-        std::fs::copy(r"C:\Windows\System32\PING.EXE", &ping).unwrap();
-        let mut leftover = Command::new(&ping)
-            .args(["-n", "120", "127.0.0.1"])
+        let copy = dir.join("leftover.exe");
+        std::fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+        let mut leftover = Command::new(&copy)
+            .args(["process_tree::tests::sleeper", "--exact", "--ignored"])
+            .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(Duration::from_secs(2));
+        assert!(
+            leftover.try_wait().unwrap().is_none(),
+            "the leftover did not start"
+        );
         assert_eq!(end_processes_in(&dir, Duration::from_secs(10)), 1);
         assert!(leftover.wait().is_ok());
         assert_eq!(end_processes_in(&dir, Duration::from_secs(1)), 0);
