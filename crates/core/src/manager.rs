@@ -1,11 +1,12 @@
 //! Paired Environments, their switches and channels: what the panel works with.
 
 use crate::channel::{
-    ChannelConfig, ChannelStatus, EngineSpec, KeyProvider, StatusListener, Supervisor,
+    ChannelConfig, ChannelStatus, EngineSpec, KeyProvider, StatusListener, Supervisor, Timing,
 };
 use crate::history::{Event, History, HistoryEntry};
 use crate::keys::DeviceKey;
 use crate::keystore::SecretStore;
+use crate::lock::{ComputerLock, Holder};
 use crate::pairing::{PairingRequest, PairingSession};
 use crate::store::{EnvironmentRecord, Store};
 use crate::{launchpad, time, Error, Result};
@@ -19,14 +20,16 @@ use std::time::Duration;
 
 pub struct ManagerConfig {
     pub data_dir: PathBuf,
-    pub ssh_program: PathBuf,
     pub engine: EngineSpec,
     pub computer_name: String,
     pub os: String,
-    /// Extra `ssh -o` options, for tests only.
-    pub extra_ssh_options: Vec<String>,
     /// The app's own tools (status, update) served next to the engine's.
     pub app_tools: Option<crate::app_tools::AppToolsHandle>,
+    /// Keep-alive and timeouts of the channels.
+    pub timing: Timing,
+    /// How long the computer stays with an Environment after its last tool
+    /// call (contract v1: 20 s).
+    pub hold_after_last_call: Duration,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -36,8 +39,11 @@ pub struct EnvironmentView {
     pub label: String,
     pub launchpad: String,
     pub device_id: String,
+    /// The Launchpad's host, without scheme or port.
     pub host: String,
     pub enabled: bool,
+    /// Another Environment's name while its agent has the computer.
+    pub controlled_by: Option<String>,
     pub paired_at: String,
     pub key_fingerprint: String,
     pub status: ChannelStatus,
@@ -66,6 +72,7 @@ pub struct Manager {
     history: Arc<History>,
     on_change: ChangeListener,
     inner: Mutex<Inner>,
+    lock: Arc<ComputerLock>,
 }
 
 fn account(id: &str) -> String {
@@ -85,18 +92,21 @@ impl Manager {
         on_change: ChangeListener,
     ) -> Result<Arc<Self>> {
         std::fs::create_dir_all(&cfg.data_dir)?;
-        let run_dir = cfg.data_dir.join("run");
-        // Key files left behind by a crash or power loss.
-        if let Ok(entries) = std::fs::read_dir(&run_dir) {
-            for e in entries.flatten() {
-                if e.path().extension().is_some_and(|x| x == "key") {
-                    let _ = std::fs::remove_file(e.path());
-                }
-            }
-        }
+        // What v0 (SSH) left here: short-lived key files and known_hosts.
+        let _ = std::fs::remove_dir_all(cfg.data_dir.join("run"));
+        let _ = std::fs::remove_dir_all(cfg.data_dir.join("known_hosts"));
         let store = Store::new(cfg.data_dir.join("environments.json"));
-        let records = store.load()?;
+        let (records, migrated) = store.load()?;
+        if migrated {
+            store.save(&records)?;
+        }
+        let lock = Arc::new(ComputerLock::with_linger(cfg.hold_after_last_call));
+        {
+            let on_change = on_change.clone();
+            lock.set_listener(Arc::new(move || on_change()));
+        }
         let manager = Arc::new(Self {
+            lock,
             history: Arc::new(History::new(cfg.data_dir.join("history.jsonl"))),
             store,
             keystore,
@@ -129,24 +139,34 @@ impl Manager {
             let seed = keystore
                 .get(&acct)?
                 .ok_or_else(|| Error::KeyStore("the key of this Environment is missing".into()))?;
-            DeviceKey::from_seed(&seed)?.private_openssh()
+            let seed: [u8; 32] = seed
+                .as_slice()
+                .try_into()
+                .map_err(|_| Error::Key("stored key has the wrong length".into()))?;
+            Ok(zeroize::Zeroizing::new(seed))
         });
         let on_change = self.on_change.clone();
         let listener: StatusListener = Arc::new(move |_, _| on_change());
         let cfg = ChannelConfig {
             env_id: rec.id.clone(),
-            ssh_program: self.cfg.ssh_program.clone(),
-            target: rec.ssh.clone(),
-            known_hosts_file: self.cfg.data_dir.join("known_hosts").join(&rec.id),
-            run_dir: self.cfg.data_dir.join("run"),
+            env_label: rec.label.clone(),
+            channel_url: rec.channel_url.clone(),
+            device_id: rec.device_id.clone(),
             engine: self.cfg.engine.clone(),
-            extra_ssh_options: self.cfg.extra_ssh_options.clone(),
             app_tools: self.cfg.app_tools.clone(),
+            lock: self.lock.clone(),
+            timing: self.cfg.timing,
         };
         Supervisor::spawn(cfg, key, self.history.clone(), listener, rec.enabled)
     }
 
+    /// The Environment whose agent has the computer now, if any.
+    pub fn controlled_by(&self) -> Option<Holder> {
+        self.lock.holder()
+    }
+
     pub fn environments(&self) -> Vec<EnvironmentView> {
+        let holder = self.lock.holder();
         let inner = self.inner.lock().unwrap();
         inner
             .records
@@ -156,8 +176,15 @@ impl Manager {
                 label: r.label.clone(),
                 launchpad: r.launchpad.clone(),
                 device_id: r.device_id.clone(),
-                host: r.ssh.host.clone(),
+                host: url::Url::parse(&r.launchpad)
+                    .ok()
+                    .and_then(|u| u.host_str().map(str::to_string))
+                    .unwrap_or_default(),
                 enabled: r.enabled,
+                controlled_by: holder
+                    .as_ref()
+                    .filter(|h| h.env_id != r.id)
+                    .map(|h| h.label.clone()),
                 paired_at: r.paired_at.clone(),
                 key_fingerprint: r.key_fingerprint.clone(),
                 status: inner
@@ -221,7 +248,7 @@ impl Manager {
                 .unwrap_or_else(|| launchpad::label(&origin)),
             launchpad: origin.clone(),
             device_id: result.device_id,
-            ssh: result.ssh,
+            channel_url: result.channel_url,
             enabled: true,
             paired_at: time::today(),
             key_fingerprint: fingerprint,
@@ -328,7 +355,6 @@ impl Manager {
             s.shutdown();
         }
         self.keystore.delete(&account(id))?;
-        let _ = std::fs::remove_file(self.cfg.data_dir.join("known_hosts").join(id));
         self.history.record(id, Event::Removed);
         (self.on_change)();
         Ok(())

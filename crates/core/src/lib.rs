@@ -15,6 +15,7 @@ pub mod history;
 pub mod keys;
 pub mod keystore;
 pub mod launchpad;
+pub mod lock;
 pub mod manager;
 pub mod mcp_tap;
 pub mod pairing;
@@ -22,8 +23,14 @@ pub mod platform;
 pub mod process_tree;
 pub mod store;
 mod time;
+pub mod wire;
 
 pub use error::{Error, Result};
+
+/// UTC `YYYY-MM-DDTHH:MM:SSZ` for unix milliseconds.
+pub fn time_rfc3339(ms: u64) -> String {
+    time::rfc3339(ms)
+}
 pub use manager::{EnvironmentView, Manager, ManagerConfig};
 
 /// Bundle identifier shared by the app, the key store entries and the data directory.

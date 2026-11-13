@@ -8,7 +8,7 @@ use crate::{Error, Result};
 use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use rand_core::{OsRng, RngCore};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -24,29 +24,13 @@ pub struct PairingRequest {
     pub public_key: String,
 }
 
-/// Where the computer connects after pairing.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SshTarget {
-    pub host: String,
-    pub user: String,
-    /// Not part of contract v0, which always uses 22; Launchpad may add it.
-    #[serde(default = "default_port")]
-    pub port: u16,
-    /// `known_hosts` lines for exactly this host and port.
-    #[serde(rename = "knownHosts")]
-    pub known_hosts: Vec<String>,
-}
-
-fn default_port() -> u16 {
-    22
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PairingResult {
     pub device_id: String,
-    pub ssh: SshTarget,
+    /// `wss://<launchpad host>/.lazurio/computers/attach` (contract v1).
+    pub channel_url: String,
     /// The Environment's name as Lazurio shows it (`environment.name`), when
-    /// Launchpad sends it. Not part of contract v0; proposed for it.
+    /// Launchpad sends it.
     pub environment_name: Option<String>,
 }
 
@@ -54,6 +38,7 @@ pub struct PairingSession {
     listener: TcpListener,
     state: String,
     url: String,
+    launchpad: String,
 }
 
 impl PairingSession {
@@ -77,6 +62,7 @@ impl PairingSession {
             listener,
             state,
             url,
+            launchpad: req.launchpad.clone(),
         })
     }
 
@@ -146,7 +132,7 @@ impl PairingSession {
         }
         let parsed = result
             .ok_or_else(|| Error::InvalidPairingResult("missing result".into()))
-            .and_then(|r| parse_result(&r));
+            .and_then(|r| parse_result(&r, &self.launchpad));
         match &parsed {
             Ok(_) => respond(&mut stream, 200, PAGE_DONE),
             Err(_) => respond(&mut stream, 400, PAGE_FAILED),
@@ -199,9 +185,19 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 struct RawResult {
     #[serde(rename = "deviceId")]
     device_id: String,
-    ssh: RawSsh,
+    #[serde(default)]
+    channel: Option<RawChannel>,
+    /// v0: an SSH target. Only its presence matters now: the channel is then
+    /// derived from the Launchpad's address.
+    #[serde(default)]
+    ssh: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     environment: Option<RawEnvironment>,
+}
+
+#[derive(Deserialize)]
+struct RawChannel {
+    url: String,
 }
 
 #[derive(Deserialize)]
@@ -210,26 +206,10 @@ struct RawEnvironment {
     name: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct RawSsh {
-    host: String,
-    user: String,
-    #[serde(default = "default_port")]
-    port: u16,
-    #[serde(rename = "knownHosts")]
-    known_hosts: KnownHosts,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum KnownHosts {
-    One(String),
-    Many(Vec<String>),
-}
-
-/// Decodes and checks the `result` parameter. Everything in it ends up on the
-/// `ssh` command line or in `known_hosts`, so it is checked strictly.
-pub fn parse_result(encoded: &str) -> Result<PairingResult> {
+/// Decodes and checks the `result` parameter. The channel must be a `wss`
+/// URL on the Launchpad's own host; a v0 result (`ssh`) gets its channel from
+/// the Launchpad's address.
+pub fn parse_result(encoded: &str, launchpad_origin: &str) -> Result<PairingResult> {
     let trimmed = encoded.trim_end_matches('=');
     let bytes = URL_SAFE_NO_PAD
         .decode(trimmed)
@@ -241,31 +221,16 @@ pub fn parse_result(encoded: &str) -> Result<PairingResult> {
     if !valid_device_id(&raw.device_id) {
         return Err(Error::InvalidPairingResult("deviceId".into()));
     }
-    if !valid_host(&raw.ssh.host) {
-        return Err(Error::InvalidPairingResult("ssh.host".into()));
-    }
-    if !valid_user(&raw.ssh.user) {
-        return Err(Error::InvalidPairingResult("ssh.user".into()));
-    }
-    if raw.ssh.port == 0 {
-        return Err(Error::InvalidPairingResult("ssh.port".into()));
-    }
-    let lines = match raw.ssh.known_hosts {
-        KnownHosts::One(s) => s.lines().map(str::to_string).collect::<Vec<_>>(),
-        KnownHosts::Many(v) => v,
+    let channel_url = match (raw.channel, raw.ssh) {
+        (Some(channel), _) => crate::wire::validate_channel_url(&channel.url, launchpad_origin)
+            .map_err(|e| Error::InvalidPairingResult(format!("channel.url: {e}")))?,
+        (None, Some(_)) => crate::wire::derive_channel_url(launchpad_origin)
+            .ok_or_else(|| Error::InvalidPairingResult("no channel for this Launchpad".into()))?,
+        (None, None) => return Err(Error::InvalidPairingResult("channel".into())),
     };
-    let known_hosts = normalize_known_hosts(&raw.ssh.host, raw.ssh.port, &lines);
-    if known_hosts.is_empty() {
-        return Err(Error::InvalidPairingResult("ssh.knownHosts".into()));
-    }
     Ok(PairingResult {
         device_id: raw.device_id,
-        ssh: SshTarget {
-            host: raw.ssh.host,
-            user: raw.ssh.user,
-            port: raw.ssh.port,
-            known_hosts,
-        },
+        channel_url,
         environment_name: raw
             .environment
             .and_then(|e| e.name)
@@ -297,70 +262,6 @@ fn valid_device_id(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
-fn valid_host(s: &str) -> bool {
-    (1..=253).contains(&s.len())
-        && !s.starts_with('-')
-        && !s.starts_with('.')
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'.')
-}
-
-fn valid_user(s: &str) -> bool {
-    (1..=64).contains(&s.len())
-        && !s.starts_with('-')
-        && s.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.')
-}
-
-/// Keeps only the key type and key of each line and writes the host pattern
-/// itself, so a line can never pin a key to another host.
-pub fn normalize_known_hosts(host: &str, port: u16, lines: &[String]) -> Vec<String> {
-    let pattern = if port == 22 {
-        host.to_string()
-    } else {
-        format!("[{host}]:{port}")
-    };
-    let mut out = Vec::new();
-    for line in lines {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with('@') {
-            continue;
-        }
-        let fields: Vec<&str> = line.split_whitespace().collect();
-        let Some(i) = fields.iter().position(|f| is_key_type(f)) else {
-            continue;
-        };
-        let Some(key) = fields.get(i + 1) else {
-            continue;
-        };
-        if key.is_empty()
-            || !key
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
-        {
-            continue;
-        }
-        let entry = format!("{pattern} {} {key}", fields[i]);
-        if !out.contains(&entry) {
-            out.push(entry);
-        }
-    }
-    out
-}
-
-fn is_key_type(f: &str) -> bool {
-    matches!(
-        f,
-        "ssh-ed25519"
-            | "ssh-rsa"
-            | "ecdsa-sha2-nistp256"
-            | "ecdsa-sha2-nistp384"
-            | "ecdsa-sha2-nistp521"
-            | "sk-ssh-ed25519@openssh.com"
-            | "sk-ecdsa-sha2-nistp256@openssh.com"
-    )
-}
-
 const PAGE_DONE: &str = "<!doctype html><meta charset=utf-8><title>Lazurio Agent Desktop</title><body style=\"font:16px system-ui;margin:48px\"><p>Počítač je připojený k Lazuriu. Toto okno můžete zavřít.</p><p lang=en>This computer is connected to Lazurio. You can close this window.</p>";
 const PAGE_DECLINED: &str = "<!doctype html><meta charset=utf-8><title>Lazurio Agent Desktop</title><body style=\"font:16px system-ui;margin:48px\"><p>Připojení jste zrušili. Toto okno můžete zavřít.</p><p lang=en>You cancelled the connection. You can close this window.</p>";
 const PAGE_FAILED: &str = "<!doctype html><meta charset=utf-8><title>Lazurio Agent Desktop</title><body style=\"font:16px system-ui;margin:48px\"><p>Připojení se nepovedlo. Zkuste to v aplikaci znovu.</p><p lang=en>Connecting failed. Please try again in the app.</p>";
@@ -370,74 +271,59 @@ const PAGE_INVALID: &str = "<!doctype html><meta charset=utf-8><title>Lazurio Ag
 mod tests {
     use super::*;
 
+    const LP: &str = "https://launchpad.acme.example.com";
+
     fn enc(json: &str) -> String {
         URL_SAFE_NO_PAD.encode(json)
     }
 
     #[test]
-    fn parses_the_contract_shape() {
-        let r = parse_result(&enc(
-            r#"{"deviceId":"office-mac","ssh":{"host":"env.tailnet.example.com","user":"env","knownHosts":"env.tailnet.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB"}}"#,
-        ))
+    fn parses_the_v1_shape() {
+        let r = parse_result(
+            &enc(r#"{"deviceId":"office-mac","channel":{"url":"wss://launchpad.acme.example.com/.lazurio/computers/attach"},"environment":{"name":"  Pracovní\u0007  Prostředí\u200b "}}"#),
+            LP,
+        )
         .unwrap();
         assert_eq!(r.device_id, "office-mac");
-        assert_eq!(r.ssh.port, 22);
-        assert_eq!(r.environment_name, None);
         assert_eq!(
-            r.ssh.known_hosts,
-            vec!["env.tailnet.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB"]
+            r.channel_url,
+            "wss://launchpad.acme.example.com/.lazurio/computers/attach"
         );
-    }
-
-    #[test]
-    fn takes_the_environment_name_when_launchpad_sends_it() {
-        let r = parse_result(&enc(
-            r#"{"deviceId":"office-mac","environment":{"name":"  Pracovní\u0007  Prostředí\u200b "},"ssh":{"host":"h","user":"u","knownHosts":"ssh-ed25519 AAAA"}}"#,
-        ))
-        .unwrap();
         assert_eq!(r.environment_name.as_deref(), Some("Pracovní Prostředí"));
-        let blank = parse_result(&enc(
-            r#"{"deviceId":"x","environment":{"name":" "},"ssh":{"host":"h","user":"u","knownHosts":"ssh-ed25519 AAAA"}}"#,
-        ))
-        .unwrap();
-        assert_eq!(blank.environment_name, None);
         assert_eq!(display_name(&"x".repeat(100)).unwrap().len(), 64);
     }
 
     #[test]
-    fn rewrites_the_host_pattern() {
-        let lines = vec![
-            "evil.example.com ssh-ed25519 AAAA".to_string(),
-            "ssh-rsa BBBB comment".to_string(),
-            "@revoked * ssh-ed25519 CCCC".to_string(),
-            "ssh-ed25519 bad!key".to_string(),
-        ];
+    fn derives_the_channel_for_a_v0_result() {
+        let r = parse_result(
+            &enc(r#"{"deviceId":"office-mac","ssh":{"host":"h","user":"u","knownHosts":"ssh-ed25519 AAAA"}}"#),
+            LP,
+        )
+        .unwrap();
         assert_eq!(
-            normalize_known_hosts("127.0.0.1", 2222, &lines),
-            vec![
-                "[127.0.0.1]:2222 ssh-ed25519 AAAA",
-                "[127.0.0.1]:2222 ssh-rsa BBBB"
-            ]
+            r.channel_url,
+            "wss://launchpad.acme.example.com/.lazurio/computers/attach"
         );
+        assert_eq!(r.environment_name, None);
     }
 
     #[test]
-    fn rejects_option_injection() {
+    fn rejects_foreign_channels_and_bad_ids() {
         for json in [
-            r#"{"deviceId":"x","ssh":{"host":"-oProxyCommand=x","user":"u","knownHosts":"ssh-ed25519 AAAA"}}"#,
-            r#"{"deviceId":"x","ssh":{"host":"h","user":"-l","knownHosts":"ssh-ed25519 AAAA"}}"#,
-            r#"{"deviceId":"X Y","ssh":{"host":"h","user":"u","knownHosts":"ssh-ed25519 AAAA"}}"#,
-            r#"{"deviceId":"x","ssh":{"host":"h","user":"u","knownHosts":"nothing"}}"#,
+            r#"{"deviceId":"x","channel":{"url":"wss://evil.example.com/.lazurio/computers/attach"}}"#,
+            r#"{"deviceId":"x","channel":{"url":"ws://launchpad.acme.example.com/.lazurio/computers/attach"}}"#,
+            r#"{"deviceId":"X Y","channel":{"url":"wss://launchpad.acme.example.com/.lazurio/computers/attach"}}"#,
+            r#"{"deviceId":"x"}"#,
         ] {
-            assert!(parse_result(&enc(json)).is_err(), "{json}");
+            assert!(parse_result(&enc(json), LP).is_err(), "{json}");
         }
-        assert!(parse_result("%%%").is_err());
+        assert!(parse_result("%%%", LP).is_err());
     }
 
     #[test]
     fn builds_the_approval_url() {
         let s = PairingSession::start(&PairingRequest {
-            launchpad: "https://launchpad.acme.example.com".into(),
+            launchpad: LP.into(),
             computer_name: "Kancelářský Mac".into(),
             os: "macos".into(),
             public_key: "ssh-ed25519 AAAA".into(),

@@ -1,51 +1,25 @@
-//! The channel with `fake-attach` standing in for `ssh` plus the Environment.
-//! Runs on every platform; `sshd.rs` repeats the important part over real OpenSSH.
+//! The channel over WebSocket against a fake Environment (contract v1).
 
 mod common;
 
-use common::{lines, no_key_files, state_of, wait};
+use common::{first_line, lines, state_of, wait, Setup};
 use lazurio_agent_desktop_core::channel::{Reason, State};
 use lazurio_agent_desktop_core::history::Event;
-use lazurio_agent_desktop_testkit::{Approval, FakeLaunchpad};
-
-fn launchpad() -> FakeLaunchpad {
-    FakeLaunchpad::start(Approval {
-        device_id: "test-computer".into(),
-        host: "env.tailnet.example.com".into(),
-        user: "env".into(),
-        port: 22,
-        known_hosts:
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
-                .into(),
-        decline: false,
-        environment_name: None,
-        on_approve: None,
-    })
-}
+use lazurio_agent_desktop_testkit::{EnvOptions, FakeEnvironment};
+use std::time::Duration;
 
 #[test]
 fn serves_mcp_reconnects_and_obeys_the_switch() {
     let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("attach.jsonl");
-    let lp = launchpad();
-    let (manager, _) = common::open(
-        dir.path(),
-        common::fake_attach(),
-        vec![format!("LadOut={}", out.display()), "LadHoldMs=200".into()],
-    );
+    let env = FakeEnvironment::start(EnvOptions::default(), dir.path().join("agent.jsonl"));
+    let lp = common::launchpad_for(&env, "test-computer", None);
+    let (manager, _) = common::open(dir.path(), Setup::default());
     let view = common::pair(&manager, &lp.origin);
     assert!(view.enabled);
 
-    // The session ends after each attach; with the switch on the app connects again.
-    assert!(wait(30, || lines(&out) >= 2), "no reconnect");
-    let first: serde_json::Value = serde_json::from_str(
-        std::fs::read_to_string(&out)
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap(),
-    )
-    .unwrap();
+    // The Environment ends each session; with the switch on the app connects again.
+    assert!(wait(30, || lines(&env.out) >= 2), "no reconnect");
+    let first = first_line(&env.out);
     assert_eq!(first["server"], "fake-engine");
     assert_eq!(first["ping"], true);
     assert_eq!(first["tools"], 2);
@@ -54,10 +28,13 @@ fn serves_mcp_reconnects_and_obeys_the_switch() {
 
     manager.set_enabled(&view.id, false).unwrap();
     assert!(wait(10, || state_of(&manager, &view.id) == State::Off));
-    let sessions = lines(&out);
-    std::thread::sleep(std::time::Duration::from_secs(3));
-    assert_eq!(lines(&out), sessions, "connected while switched off");
-    assert!(no_key_files(dir.path()), "a key file was left behind");
+    let sessions = env.stats().sessions;
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(
+        env.stats().sessions,
+        sessions,
+        "connected while switched off"
+    );
 
     let history = manager.history(200);
     let events: Vec<Event> = history.iter().map(|e| e.event).collect();
@@ -69,11 +46,9 @@ fn serves_mcp_reconnects_and_obeys_the_switch() {
     ] {
         assert!(events.contains(&e), "{e:?} missing in {events:?}");
     }
-    let ok_tool = history
-        .iter()
-        .find(|e| e.event == Event::Tool && e.ok == Some(true))
-        .unwrap();
-    assert_eq!(ok_tool.tool.as_deref(), Some("desktop_fake_tool"));
+    assert!(history.iter().any(|e| e.event == Event::Tool
+        && e.tool.as_deref() == Some("desktop_fake_tool")
+        && e.ok == Some(true)));
     assert!(history.iter().any(|e| e.event == Event::Tool
         && e.tool.as_deref() == Some("desktop_fail")
         && e.ok == Some(false)));
@@ -90,20 +65,56 @@ fn serves_mcp_reconnects_and_obeys_the_switch() {
 }
 
 #[test]
+fn reconnects_when_the_environment_stops_answering_pings() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = FakeEnvironment::start(
+        EnvOptions {
+            silent_after_ready: true,
+            ..EnvOptions::default()
+        },
+        dir.path().join("agent.jsonl"),
+    );
+    let lp = common::launchpad_for(&env, "test-computer", None);
+    let (manager, _) = common::open(dir.path(), Setup::default());
+    common::pair(&manager, &lp.origin);
+    // No pong within dead_after (1 s in tests): offline, then a new session.
+    assert!(wait(20, || env.stats().sessions >= 2), "{:?}", env.stats());
+    manager.shutdown();
+}
+
+#[test]
+fn pings_while_the_environment_holds_the_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let env = FakeEnvironment::start(
+        EnvOptions {
+            hold: Duration::from_secs(2),
+            ..EnvOptions::default()
+        },
+        dir.path().join("agent.jsonl"),
+    );
+    let lp = common::launchpad_for(&env, "test-computer", None);
+    let (manager, _) = common::open(dir.path(), Setup::default());
+    common::pair(&manager, &lp.origin);
+    assert!(wait(20, || lines(&env.out) >= 1));
+    // Every 200 ms in tests (15 s in the app).
+    assert!(wait(5, || env.stats().pings >= 3), "{:?}", env.stats());
+    manager.shutdown();
+}
+
+#[test]
 fn stop_ends_the_session_and_comes_back() {
     let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("attach.jsonl");
-    let lp = launchpad();
-    let (manager, _) = common::open(
-        dir.path(),
-        common::fake_attach(),
-        vec![
-            format!("LadOut={}", out.display()),
-            "LadHoldMs=60000".into(),
-        ],
+    let env = FakeEnvironment::start(
+        EnvOptions {
+            hold: Duration::from_secs(60),
+            ..EnvOptions::default()
+        },
+        dir.path().join("agent.jsonl"),
     );
+    let lp = common::launchpad_for(&env, "test-computer", None);
+    let (manager, _) = common::open(dir.path(), Setup::default());
     let view = common::pair(&manager, &lp.origin);
-    assert!(wait(20, || lines(&out) >= 1));
+    assert!(wait(20, || lines(&env.out) >= 1));
     assert!(wait(10, || matches!(
         state_of(&manager, &view.id),
         State::Connected | State::Working
@@ -111,11 +122,13 @@ fn stop_ends_the_session_and_comes_back() {
 
     manager.stop(&view.id).unwrap();
     assert!(wait(5, || state_of(&manager, &view.id) == State::Waiting));
-    let status = manager.environments()[0].status.clone();
-    assert_eq!(status.reason, Some(Reason::Stopped));
+    assert_eq!(
+        manager.environments()[0].status.reason,
+        Some(Reason::Stopped)
+    );
     // The switch is still on, so the agent can continue after the pause.
     assert!(
-        wait(20, || lines(&out) >= 2),
+        wait(20, || lines(&env.out) >= 2),
         "did not reconnect after stop"
     );
     assert!(manager
@@ -123,62 +136,134 @@ fn stop_ends_the_session_and_comes_back() {
         .iter()
         .any(|e| e.event == Event::Disconnected && e.reason.as_deref() == Some("stopped")));
     manager.shutdown();
-    assert!(no_key_files(dir.path()));
 }
 
 #[test]
-fn reports_why_it_cannot_connect() {
+fn reports_why_the_environment_refused() {
     let dir = tempfile::tempdir().unwrap();
-    let lp = launchpad();
-    let (manager, _) = common::open(
-        dir.path(),
-        common::fake_attach(),
-        vec!["LadReject=1".into()],
+    let env = FakeEnvironment::start(
+        EnvOptions {
+            deny: Some("removed".into()),
+            ..EnvOptions::default()
+        },
+        dir.path().join("agent.jsonl"),
     );
+    let lp = common::launchpad_for(&env, "test-computer", None);
+    let (manager, _) = common::open(dir.path(), Setup::default());
     let view = common::pair(&manager, &lp.origin);
     assert!(wait(20, || manager.environments()[0].status.reason
-        == Some(Reason::AlreadyConnected)));
+        == Some(Reason::NotAuthorized)));
     assert_eq!(state_of(&manager, &view.id), State::Waiting);
-    assert!(!manager
-        .history(100)
-        .iter()
-        .any(|e| e.event == Event::Connected));
+    assert_eq!(lines(&env.out), 0);
     manager.shutdown();
 }
 
 #[test]
 fn serves_the_app_tools_next_to_the_engine() {
     let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("attach.jsonl");
-    let lp = launchpad();
-    let (manager, _) = common::open_full(
+    let env = FakeEnvironment::start(EnvOptions::default(), dir.path().join("agent.jsonl"));
+    let lp = common::launchpad_for(&env, "test-computer", None);
+    let (manager, _) = common::open(
         dir.path(),
-        common::fake_attach(),
-        vec![format!("LadOut={}", out.display()), "LadHoldMs=200".into()],
-        common::fake_engine(),
-        common::app_tools(),
+        Setup {
+            app_tools: common::app_tools(),
+            ..Setup::default()
+        },
     );
     common::pair(&manager, &lp.origin);
-    assert!(wait(20, || lines(&out) >= 1));
-    let first: serde_json::Value = serde_json::from_str(
-        std::fs::read_to_string(&out)
-            .unwrap()
-            .lines()
-            .next()
-            .unwrap(),
-    )
-    .unwrap();
+    assert!(wait(20, || lines(&env.out) >= 1));
+    let first = first_line(&env.out);
     // Engine tools plus the app's own, one answered by the app, not the engine.
     assert_eq!(first["tools"], 3);
     assert_eq!(first["app_status"], "fake-app-status 9.9.9");
     assert_eq!(first["app_meta"]["appVersion"], "9.9.9");
     assert_eq!(first["server"], "fake-engine");
-    assert_eq!(first["c1_ok"], true);
     assert!(wait(10, || manager
         .history(100)
         .iter()
         .any(|e| e.event == Event::Tool
             && e.tool.as_deref() == Some("lazurio_app_status")
             && e.ok == Some(true))));
+    manager.shutdown();
+}
+
+#[test]
+fn one_agent_at_a_time_across_environments() {
+    let dir = tempfile::tempdir().unwrap();
+    // Spectoda's agent works first and keeps its session; Lumbio's agent tries a second later.
+    let first = FakeEnvironment::start(
+        EnvOptions {
+            environment: "env-spectoda".into(),
+            hold: Duration::from_secs(10),
+            ..EnvOptions::default()
+        },
+        dir.path().join("spectoda.jsonl"),
+    );
+    let second = FakeEnvironment::start(
+        EnvOptions {
+            environment: "env-lumbio".into(),
+            call_delay: Duration::from_secs(1),
+            hold: Duration::from_secs(10),
+            ..EnvOptions::default()
+        },
+        dir.path().join("lumbio.jsonl"),
+    );
+    let lp1 = common::launchpad_for(&first, "test-computer", Some("Spectoda"));
+    let lp2 = common::launchpad_for(&second, "test-computer", Some("Lumbio"));
+    let (manager, _) = common::open(dir.path(), Setup::default());
+    let a = common::pair(&manager, &lp1.origin);
+    assert!(wait(20, || lines(&first.out) >= 1));
+    let b = common::pair(&manager, &lp2.origin);
+    assert!(wait(20, || lines(&second.out) >= 1));
+
+    let refused = first_line(&second.out);
+    assert_eq!(refused["c1_ok"], false);
+    let text = refused["c1_text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{refused}"));
+    assert!(text.contains("ovládá agent z Spectoda"), "{text}");
+    // The panel tells Lumbio who works now; Spectoda itself sees nobody else.
+    let views = manager.environments();
+    let view_a = views.iter().find(|e| e.id == a.id).unwrap();
+    let view_b = views.iter().find(|e| e.id == b.id).unwrap();
+    assert_eq!(view_b.controlled_by.as_deref(), Some("Spectoda"));
+    assert_eq!(view_a.controlled_by, None);
+    assert_eq!(manager.controlled_by().unwrap().label, "Spectoda");
+    manager.shutdown();
+}
+
+/// The real Agent Desktop engine over the WebSocket channel, when `LAD_ENGINE`
+/// is set (`scripts/build-engine.sh` or a local build of the fork).
+#[test]
+fn real_engine_over_the_channel() {
+    let Some(engine) = common::real_engine() else {
+        eprintln!("skipping: LAD_ENGINE is not set");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let env = FakeEnvironment::start(EnvOptions::default(), dir.path().join("agent.jsonl"));
+    let lp = common::launchpad_for(&env, "test-computer", None);
+    let (manager, _) = common::open(
+        dir.path(),
+        Setup {
+            engine,
+            ..Setup::default()
+        },
+    );
+    let view = common::pair(&manager, &lp.origin);
+    assert!(
+        wait(60, || lines(&env.out) >= 1),
+        "no MCP session with the real engine: {:?}",
+        manager.environments()[0].status
+    );
+    let first = first_line(&env.out);
+    assert_eq!(first["server"], "agent-desktop", "{first}");
+    assert_eq!(
+        first["ping"], true,
+        "the broker's liveness ping needs an answer"
+    );
+    assert!(first["tools"].as_u64().unwrap() > 10, "{first}");
+    manager.set_enabled(&view.id, false).unwrap();
+    assert!(wait(10, || state_of(&manager, &view.id) == State::Off));
     manager.shutdown();
 }

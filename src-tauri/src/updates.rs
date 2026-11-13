@@ -283,6 +283,15 @@ impl AgentTools {
                 Channel::Pilot => PILOT_URL,
             },
             "updateAvailable": available,
+            "controlledBy": self
+                .app
+                .state::<AppState>()
+                .manager
+                .controlled_by()
+                .map(|h| json!({
+                    "environment": h.label,
+                    "since": lazurio_agent_desktop_core::time_rfc3339(h.since_ms),
+                })),
             "checkError": error,
         })
     }

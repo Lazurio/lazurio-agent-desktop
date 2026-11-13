@@ -1,12 +1,12 @@
 //! The device key: one ed25519 key per paired Environment.
 //!
-//! Only the 32-byte seed is stored (in the system key store). The OpenSSH
-//! private key file exists just long enough for `ssh` to authenticate.
+//! Only the 32-byte seed is stored (in the system key store). The attach
+//! handshake signs with it in memory; the key never touches the disk.
 
 use crate::{Error, Result};
 use rand_core::OsRng;
 use ssh_key::private::{Ed25519Keypair, KeypairData};
-use ssh_key::{Algorithm, HashAlg, LineEnding, PrivateKey, PublicKey};
+use ssh_key::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use zeroize::Zeroizing;
 
 pub struct DeviceKey(PrivateKey);
@@ -48,13 +48,6 @@ impl DeviceKey {
     pub fn fingerprint(&self) -> String {
         self.0.public_key().fingerprint(HashAlg::Sha256).to_string()
     }
-
-    /// The unencrypted OpenSSH private key file contents.
-    pub fn private_openssh(&self) -> Result<Zeroizing<String>> {
-        self.0
-            .to_openssh(LineEnding::LF)
-            .map_err(|e| Error::Key(e.to_string()))
-    }
 }
 
 #[cfg(test)]
@@ -69,8 +62,6 @@ mod tests {
         assert!(key.public_openssh().starts_with("ssh-ed25519 "));
         assert_eq!(key.public_openssh().split(' ').count(), 2);
         assert!(key.fingerprint().starts_with("SHA256:"));
-        let pem = again.private_openssh().unwrap();
-        assert!(pem.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
     }
 
     #[test]

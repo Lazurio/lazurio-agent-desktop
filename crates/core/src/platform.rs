@@ -1,7 +1,7 @@
 //! The few places where macOS and Windows differ for the core.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// `macos` or `windows`, as the contract's `os` parameter expects.
@@ -18,19 +18,6 @@ pub fn os_name() -> &'static str {
 /// The system's version, for example `15.1.0` on macOS or `10.0.26100` on Windows.
 pub fn os_version() -> String {
     os_info::get().version().to_string()
-}
-
-/// The system OpenSSH client the contract names.
-pub fn default_ssh_program() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let windir = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
-        PathBuf::from(windir).join("System32\\OpenSSH\\ssh.exe")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        PathBuf::from("/usr/bin/ssh")
-    }
 }
 
 /// The name people know the computer by, as the system shows it: on macOS

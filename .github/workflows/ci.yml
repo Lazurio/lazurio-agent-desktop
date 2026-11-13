@@ -26,10 +26,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, sshd: "1" }
-          - { os: macos-15, target: aarch64-apple-darwin, sshd: "1" }
-          - { os: macos-15-intel, target: x86_64-apple-darwin, sshd: "1" }
-          - { os: windows-2025, target: x86_64-pc-windows-msvc, sshd: "0" }
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc }
     steps:
       - uses: actions/checkout@v4
       - name: Toolchain
@@ -46,16 +46,7 @@ jobs:
         run: python3 -I scripts/latest_json.py --self-test
       - name: Clippy
         run: cargo clippy --locked -p lazurio-agent-desktop-core -p lazurio-agent-desktop-testkit --all-targets -- -D warnings
-      - name: OpenSSH server for the end-to-end test
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q openssh-server
-          # sshd without PAM refuses accounts whose password is locked ("!"); the runner's is.
-          if sudo passwd -S "$USER" | awk '{print $2}' | grep -q '^L'; then sudo usermod -p '*' "$USER"; fi
       - name: Test
-        env:
-          LAD_REQUIRE_SSHD: ${{ matrix.sshd }}
         run: cargo test --locked -p lazurio-agent-desktop-core -p lazurio-agent-desktop-testkit
 
   app:

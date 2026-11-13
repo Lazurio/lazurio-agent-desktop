@@ -61,32 +61,31 @@ může spustit i agent nástrojem `lazurio_app_update`.
 ## Security
 
 **What an agent can do.** While the switch is on and the computer is connected,
-one agent of that Environment at a time can see the screen and click and type
-in any app under the signed-in user's account, like Computer Use. Agents follow
-the Environment's rules: they prepare drafts, and sending or publishing waits
-for the person's approval. The content of documents is data for the agent, not
+one agent at a time can see the screen and click and type in any app under the
+signed-in user's account, like Computer Use. One agent on the whole computer:
+while an agent from one Environment works (or worked less than 20 seconds ago),
+tool calls from every other Environment are refused with "The computer is in
+use by an agent from …", and the panel shows who works. Agents follow the
+Environment's rules: they prepare drafts, and sending or publishing waits for
+the person's approval. The content of documents is data for the agent, not
 instructions.
 
 **Where the key is.** Pairing creates one ed25519 key per Environment. Only its
 32-byte seed is stored, in the macOS Keychain or in the Windows Credential
 Manager (protected by DPAPI for the signed-in user), under the service name
-`io.lazurio.agent-desktop`. The private key never leaves the computer. For each
-connection the app writes it to a file only the user can read, hands it to the
-system OpenSSH client and deletes it as soon as the Environment answers (at the
-latest after 30 seconds, and on every start of the app).
+`io.lazurio.agent-desktop`. The private key never leaves the computer and never
+touches the disk: the app signs the Environment's challenge with it in memory.
 
-**What the Environment can do with the key.** Launchpad writes the public key
-to `authorized_keys` of the Environment's account with
-`restrict,command="<home>/.local/bin/lazurio computer attach --device <id>"`, so
-the key can only start that one command: no shell, no port forwarding, no agent
-forwarding. The Environment pings the computer every 15 seconds, ends the
-session when the key is removed there, and lets one agent at a time use the
-computer; an agent's turn also ends after 2 minutes without a call.
+**What the Environment can do with the key.** Launchpad keeps the public key in
+the Environment's own list of computers. It only verifies the computer's
+signature with it; the key opens no shell, account or port anywhere. The
+Environment pings the computer every 15 seconds, refuses a second session of
+the same computer, and ends the session when the computer is removed there.
 
-**What the computer trusts.** The app connects only to the host and host key
-that Launchpad returned during pairing (`StrictHostKeyChecking=yes`, its own
-`known_hosts`, no user SSH configuration). A different host key stops the
-connection.
+**What the computer trusts.** The app connects only to
+`wss://<Lazurio address>/.lazurio/computers/attach`, on the host of the Lazurio
+address it was paired with, with ordinary certificate checks (the system's
+trusted certificates). The network path stays the tailnet.
 
 **Updates.** The app installs only update packages signed with the updater
 key whose public half is in `src-tauri/tauri.conf.json`, only versions newer
@@ -98,16 +97,16 @@ the release workflow.
 
 **Turning it off.** Switch off (no connection), **Stop** (ends the current
 session), **Remove** (deletes the key here), and removing the computer in
-Lazurio (deletes the `authorized_keys` line). Quitting the app also ends every
+Lazurio (the Environment forgets its key). Quitting the app also ends every
 connection.
 
 **Local data.** `~/Library/Application Support/io.lazurio.agent-desktop`
 (macOS) or `%LOCALAPPDATA%\io.lazurio.agent-desktop` (Windows):
-`environments.json` (no secrets), `known_hosts/`, `history.jsonl` (no content).
+`environments.json` (no secrets) and `history.jsonl` (no content).
 
 ## How it works
 
-Contract v0 between the app and the Environment (the Environment side lives in
+Contract v1 between the app and the Environment (the Environment side lives in
 [Lazurio/LazurioPlatform](https://github.com/Lazurio/LazurioPlatform)):
 
 1. **Pairing.** The app creates a key, listens once on `127.0.0.1:<random port>`
@@ -115,15 +114,21 @@ Contract v0 between the app and the Environment (the Environment side lives in
    `https://<launchpad>/connect/computer?name=…&os=…&pubkey=…&callback=http://127.0.0.1:<port>/cb&state=…`
    in the browser. After the owner approves, Launchpad redirects to the
    callback with the same `state` and `result` = base64url JSON
-   `{ deviceId, ssh: { host, user, knownHosts } }`; Cancel on the page returns
-   `error=cancelled` instead.
-2. **Channel.** While the switch is on, the app starts the system OpenSSH client
-   (`/usr/bin/ssh`, `%WINDIR%\System32\OpenSSH\ssh.exe`) to the Environment and
-   the Agent Desktop MCP server (`agent-desktop mcp`), and joins their stdio line
-   by line. The Environment's forced command speaks MCP to the computer, so the
-   computer is the MCP server and its tools are the Agent Desktop `desktop_*`
-   tools. When the session drops and the switch is on, the app reconnects with a
-   growing delay (1 s up to 60 s).
+   `{ deviceId, channel: { url }, environment: { name } }`; Cancel on the page
+   returns `error=cancelled` instead.
+2. **Channel.** While the switch is on, the app opens
+   `wss://<launchpad host>/.lazurio/computers/attach?device=<deviceId>`. The
+   Environment sends `{"type":"challenge","v":1,"environment","nonce","ts"}`;
+   the app answers `{"type":"auth","v":1,"device","signature"}` with an Ed25519
+   signature over `lazurio-computer-attach-v1\n<environment>\n<nonce>\n<ts>`.
+   After `{"type":"ready"}` (or `denied` with a reason) the app starts the Agent
+   Desktop MCP server (`agent-desktop mcp`) and every text frame is one MCP
+   message: the computer is the MCP server and its tools are the Agent Desktop
+   `desktop_*` tools. WebSocket ping every 15 s, disconnect after 45 s without
+   an answer, reconnect after 1 s up to 60 s only while the switch is on.
+
+A computer paired under contract v0 (SSH) gets its channel from the Lazurio
+address it remembers; nothing about SSH is needed on the computer any more.
 
 On that same session the app adds two tools of its own, `lazurio_app_status`
 (version, system, update channel, available update) and `lazurio_app_update`
@@ -145,10 +150,11 @@ in the signed-in user's session, where UI Automation works.
 cargo test -p lazurio-agent-desktop-core -p lazurio-agent-desktop-testkit
 ```
 
-The tests pair against a fake Launchpad and run the channel twice: with a fake
-Environment in place of `ssh` (every platform) and over the real OpenSSH client
-against a local `sshd` with the contract's `restrict,command=` line (Unix; CI
-requires it on Linux with `LAD_REQUIRE_SSHD=1`).
+The tests pair against a fake Launchpad and run the channel against a fake
+Environment that implements the attach endpoint of contract v1: challenge,
+signature check, age of `ts`, one-time `nonce`, one session per computer,
+`denied`, pings, and an agent that calls tools. With `LAD_ENGINE` pointing at a
+build of the engine, one test runs the real engine over the channel.
 
 The app (macOS or Windows):
 

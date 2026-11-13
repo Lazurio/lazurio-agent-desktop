@@ -6,6 +6,7 @@
 //! and system under `_meta["io.lazurio/agent-desktop"]`. Every other line
 //! passes through unchanged.
 
+use crate::lock::{ComputerLock, Holder};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -38,6 +39,11 @@ impl std::fmt::Debug for AppToolsHandle {
 /// What to do with a line from the Environment.
 pub(crate) enum Route {
     Engine,
+    /// A tool call refused because another Environment holds the computer.
+    Refuse {
+        id: Value,
+        holder: Holder,
+    },
     /// An app tool call: answer it here.
     Local {
         id: Value,
@@ -72,14 +78,32 @@ struct IdOnly {
     id: Option<Value>,
 }
 
+/// Tools that answer about the computer itself and never take it over.
+const LOCK_FREE_TOOLS: &[&str] = &["lazurio_app_status"];
+
+/// The Environment a router serves and the lock it shares with the others.
+pub(crate) struct LockSeat {
+    pub(crate) lock: Arc<ComputerLock>,
+    pub(crate) env_id: String,
+    pub(crate) label: String,
+}
+
 pub(crate) struct Router {
     tools: Option<Arc<dyn AppTools>>,
     names: HashSet<String>,
     list_ids: Mutex<HashSet<String>>,
     init_ids: Mutex<HashSet<String>>,
+    seat: Option<LockSeat>,
 }
 
 impl Router {
+    pub(crate) fn with_lock(tools: Option<Arc<dyn AppTools>>, seat: LockSeat) -> Self {
+        Self {
+            seat: Some(seat),
+            ..Self::new(tools)
+        }
+    }
+
     pub(crate) fn new(tools: Option<Arc<dyn AppTools>>) -> Self {
         let names = tools
             .as_ref()
@@ -95,7 +119,25 @@ impl Router {
             names,
             list_ids: Mutex::new(HashSet::new()),
             init_ids: Mutex::new(HashSet::new()),
+            seat: None,
         }
+    }
+
+    /// The computer-wide lock for a tool call; `Err` with the holder when
+    /// another Environment has the computer.
+    fn take_lock(&self, tool: Option<&str>) -> Result<(), Holder> {
+        let Some(seat) = &self.seat else {
+            return Ok(());
+        };
+        if tool.is_some_and(|t| LOCK_FREE_TOOLS.contains(&t)) {
+            return Ok(());
+        }
+        seat.lock.try_begin(&seat.env_id, &seat.label)
+    }
+
+    /// Whether a tool call took the lock (and so must give it back when done).
+    pub(crate) fn holds_for(&self, tool: &str) -> bool {
+        self.seat.is_some() && !LOCK_FREE_TOOLS.contains(&tool)
     }
 
     pub(crate) fn tools(&self) -> Option<&Arc<dyn AppTools>> {
@@ -103,7 +145,7 @@ impl Router {
     }
 
     pub(crate) fn route_environment_line(&self, line: &[u8]) -> Route {
-        if self.tools.is_none() {
+        if self.tools.is_none() && self.seat.is_none() {
             return Route::Engine;
         }
         let Ok(msg) = serde_json::from_slice::<Incoming>(line) else {
@@ -125,6 +167,9 @@ impl Router {
             "tools/call" => {
                 let params = msg.params;
                 let name = params.as_ref().and_then(|p| p.name.clone());
+                if let Err(holder) = self.take_lock(name.as_deref()) {
+                    return Route::Refuse { id, holder };
+                }
                 if let Some(name) = name.filter(|n| self.names.contains(n)) {
                     let arguments = params
                         .and_then(|p| p.arguments)
@@ -253,7 +298,7 @@ mod tests {
                 assert_eq!(name, "lazurio_app_status");
                 assert_eq!(arguments, json!({"x":1}));
             }
-            Route::Engine => panic!("app tool went to the engine"),
+            _ => panic!("app tool went to the engine"),
         }
         assert!(matches!(
             r.route_environment_line(
@@ -283,5 +328,33 @@ mod tests {
         r.route_environment_line(br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#);
         let line = br#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
         assert!(matches!(r.rewrite_engine_line(line), Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn refuses_calls_while_another_environment_holds_the_computer() {
+        let lock = Arc::new(ComputerLock::default());
+        let seat = |id: &str, label: &str| LockSeat {
+            lock: lock.clone(),
+            env_id: id.into(),
+            label: label.into(),
+        };
+        let a = Router::with_lock(Some(Arc::new(Fake)), seat("a", "Spectoda"));
+        let b = Router::with_lock(Some(Arc::new(Fake)), seat("b", "Lumbio"));
+        let call =
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_click"}}"#;
+        assert!(matches!(a.route_environment_line(call), Route::Engine));
+        match b.route_environment_line(call) {
+            Route::Refuse { holder, .. } => assert_eq!(holder.label, "Spectoda"),
+            _ => panic!("b must be refused while a works"),
+        }
+        // The status tool still answers for b, so its agent can see who works.
+        assert!(matches!(
+            b.route_environment_line(
+                br#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"lazurio_app_status"}}"#
+            ),
+            Route::Local { .. }
+        ));
+        assert!(!b.holds_for("lazurio_app_status"));
+        assert!(b.holds_for("desktop_click"));
     }
 }

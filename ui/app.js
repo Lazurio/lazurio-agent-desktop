@@ -57,7 +57,9 @@ function statusLine(env) {
     case "connecting":
       dot = "connecting"; text = t("state_connecting"); break;
     case "connected":
-      dot = "on"; text = t("state_connected"); break;
+      dot = "on"; text = t("state_connected");
+      if (env.controlledBy) detail = t("controlled_by", { env: env.controlledBy });
+      break;
     case "working": {
       dot = "busy"; text = t("state_working");
       const app = s.app ? t("working_in", { app: s.app }) : "";

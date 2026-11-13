@@ -1,33 +1,36 @@
-//! The channel (contract v0, section 2).
+//! The channel (contract v1, section 2).
 //!
 //! While the owner's switch is on, the supervisor keeps one session alive: it
-//! starts the system OpenSSH client towards the Environment and the Agent
-//! Desktop MCP server (`agent-desktop mcp`), and joins the stdio of the two
-//! line by line. The Environment's forced command speaks MCP to the computer,
-//! so the computer is the MCP server and nothing on it listens on the network.
+//! opens the WebSocket to the Environment's Launchpad, proves the computer's
+//! identity by signing the Environment's challenge with the device key (in
+//! memory), and after `ready` starts the Agent Desktop MCP server
+//! (`agent-desktop mcp`) and joins it to the socket: one text frame is one MCP
+//! message. The Environment speaks MCP to the computer, so the computer is the
+//! MCP server and nothing on it listens on the network.
 //!
 //! When the session ends and the switch is still on, the supervisor connects
 //! again after a growing delay. Turning the switch off or [`Supervisor::stop_now`]
 //! ends the session at once.
 
-use crate::app_tools::{AppToolsHandle, Route, Router};
+use crate::app_tools::{AppToolsHandle, LockSeat, Route, Router};
 use crate::history::{Event, History, HistoryEntry};
+use crate::lock::{busy_message, ComputerLock};
 use crate::mcp_tap::{Tap, TapEvent};
-use crate::pairing::SshTarget;
-use crate::platform::{hide_console, write_atomic, write_private_file};
+use crate::platform::hide_console;
 use crate::process_tree::ProcessTree;
 use crate::time::{now_ms, rfc3339};
+use crate::wire::{self, Socket, WireError};
 use crate::Result;
 use rand_core::{OsRng, RngCore};
 use serde::Serialize;
-use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use tungstenite::Message;
 use zeroize::Zeroizing;
 
 /// How the engine is started; the app points it at the bundled sidecar.
@@ -38,19 +41,38 @@ pub struct EngineSpec {
     pub env: Vec<(String, String)>,
 }
 
-#[derive(Clone, Debug)]
+/// Keep-alive and timeouts; tests shorten them.
+#[derive(Clone, Copy, Debug)]
+pub struct Timing {
+    pub connect_timeout: Duration,
+    pub ping_every: Duration,
+    pub dead_after: Duration,
+}
+
+impl Default for Timing {
+    fn default() -> Self {
+        Self {
+            connect_timeout: Duration::from_secs(20),
+            ping_every: Duration::from_secs(15),
+            dead_after: Duration::from_secs(45),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct ChannelConfig {
     pub env_id: String,
-    pub ssh_program: PathBuf,
-    pub target: SshTarget,
-    pub known_hosts_file: PathBuf,
-    /// Short-lived files such as the key handed to `ssh`.
-    pub run_dir: PathBuf,
+    /// The Environment's name, for the computer-wide lock's messages.
+    pub env_label: String,
+    /// `wss://<launchpad host>/.lazurio/computers/attach`.
+    pub channel_url: String,
+    pub device_id: String,
     pub engine: EngineSpec,
-    /// Extra `-o` options, for tests only.
-    pub extra_ssh_options: Vec<String>,
     /// Tools the app serves itself next to the engine's.
     pub app_tools: Option<AppToolsHandle>,
+    /// One agent at a time across all Environments.
+    pub lock: Arc<ComputerLock>,
+    pub timing: Timing,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
@@ -69,10 +91,12 @@ pub enum State {
 #[serde(rename_all = "kebab-case")]
 pub enum Reason {
     Offline,
-    HostKey,
+    /// The Environment's certificate did not verify.
+    Certificate,
+    /// The Environment answered the upgrade with 404: no HTTPS channel yet.
+    Unsupported,
     NotAuthorized,
     AlreadyConnected,
-    SshMissing,
     EngineMissing,
     KeyMissing,
     Stopped,
@@ -85,16 +109,34 @@ impl Reason {
     pub fn code(self) -> &'static str {
         match self {
             Reason::Offline => "offline",
-            Reason::HostKey => "host-key",
+            Reason::Certificate => "certificate",
+            Reason::Unsupported => "unsupported",
             Reason::NotAuthorized => "not-authorized",
             Reason::AlreadyConnected => "already-connected",
-            Reason::SshMissing => "ssh-missing",
             Reason::EngineMissing => "engine-missing",
             Reason::KeyMissing => "key-missing",
             Reason::Stopped => "stopped",
             Reason::SwitchedOff => "switched-off",
             Reason::Ended => "ended",
             Reason::Error => "error",
+        }
+    }
+
+    fn from_wire(e: &WireError) -> Self {
+        match e {
+            WireError::Offline(_) => Reason::Offline,
+            WireError::Certificate(_) => Reason::Certificate,
+            WireError::Http(404) => Reason::Unsupported,
+            WireError::Http(401 | 403) => Reason::NotAuthorized,
+            WireError::Http(_) => Reason::Offline,
+            WireError::Denied(r) => match r.as_str() {
+                "already-attached" | "already-connected" => Reason::AlreadyConnected,
+                "unknown-device" | "not-paired" | "bad-signature" | "removed" => {
+                    Reason::NotAuthorized
+                }
+                _ => Reason::Error,
+            },
+            WireError::Protocol(_) => Reason::Error,
         }
     }
 }
@@ -125,13 +167,12 @@ impl ChannelStatus {
     }
 }
 
-pub type KeyProvider = Arc<dyn Fn() -> Result<Zeroizing<String>> + Send + Sync>;
+/// The device key's 32-byte seed, from the system key store, kept in memory only.
+pub type KeyProvider = Arc<dyn Fn() -> Result<Zeroizing<[u8; 32]>> + Send + Sync>;
 pub type StatusListener = Arc<dyn Fn(&str, &ChannelStatus) + Send + Sync>;
 
 /// Seconds a working state lasts after the last tool call finished.
 const WORKING_LINGER: Duration = Duration::from_secs(20);
-/// The key file is deleted as soon as the Environment speaks; at the latest after this.
-const KEY_FILE_MAX_AGE: Duration = Duration::from_secs(30);
 /// A session that ran this long resets the reconnect delay.
 const STABLE_SESSION: Duration = Duration::from_secs(30);
 const RECONNECT_AFTER_STOP: Duration = Duration::from_secs(3);
@@ -250,8 +291,9 @@ struct Outcome {
 }
 
 enum Msg {
-    EnvironmentSpoke,
     Tap(TapEvent),
+    /// One MCP message for the Environment.
+    Out(String),
 }
 
 impl Worker {
@@ -354,28 +396,38 @@ impl Worker {
             lasted: started.elapsed(),
             reason,
         };
-        if !self.cfg.ssh_program.exists() {
-            return fail(Reason::SshMissing);
-        }
         if !self.cfg.engine.program.exists() {
             return fail(Reason::EngineMissing);
         }
-        let pem = match (self.key)() {
-            Ok(pem) => pem,
+        let seed = match (self.key)() {
+            Ok(seed) => seed,
             Err(_) => return fail(Reason::KeyMissing),
         };
-        let known_hosts = self.cfg.target.known_hosts.join("\n") + "\n";
-        if write_atomic(&self.cfg.known_hosts_file, known_hosts.as_bytes()).is_err() {
-            return fail(Reason::Error);
+        let timing = self.cfg.timing;
+        let url = match wire::attach_url(&self.cfg.channel_url, &self.cfg.device_id) {
+            Ok(url) => url,
+            Err(_) => return fail(Reason::Error),
+        };
+        let mut socket = match wire::connect(&url, timing.connect_timeout) {
+            Ok(s) => s,
+            Err(e) => return fail(Reason::from_wire(&e)),
+        };
+        let auth = wire::authenticate(
+            &mut socket,
+            &self.cfg.device_id,
+            &seed,
+            timing.connect_timeout,
+        );
+        drop(seed);
+        if let Err(e) = auth {
+            return fail(Reason::from_wire(&e));
         }
-        let _ = std::fs::create_dir_all(&self.cfg.run_dir);
-        let key_file = KeyFile::create(&self.cfg.run_dir, &self.cfg.env_id, pem.as_bytes());
-        drop(pem);
-        let key_file = match key_file {
-            Ok(k) => k,
-            Err(_) => return fail(Reason::KeyMissing),
-        };
+        if self.end_requested().is_some() {
+            let _ = socket.close(None);
+            return fail(Reason::SwitchedOff);
+        }
 
+        // Only a ready channel gets an engine.
         let mut engine_cmd = Command::new(&self.cfg.engine.program);
         engine_cmd
             .args(&self.cfg.engine.args)
@@ -385,173 +437,175 @@ impl Worker {
             .stderr(Stdio::null());
         let mut engine = match hide_console(&mut engine_cmd).spawn() {
             Ok(c) => Kill(c),
-            Err(_) => return fail(Reason::EngineMissing),
+            Err(_) => {
+                let _ = socket.close(None);
+                return fail(Reason::EngineMissing);
+            }
         };
-        let mut ssh_cmd = Command::new(&self.cfg.ssh_program);
-        ssh_cmd
-            .args(ssh_args(
-                &self.cfg.target,
-                &self.cfg.known_hosts_file,
-                key_file.path(),
-                &self.cfg.extra_ssh_options,
-            ))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut ssh = match hide_console(&mut ssh_cmd).spawn() {
-            Ok(c) => Kill(c),
-            Err(_) => return fail(Reason::SshMissing),
-        };
-
-        // Engine, ssh and everything they start end together (Windows: one job).
+        // The engine and everything it starts end together (Windows: one job).
         let tree = ProcessTree::new();
         tree.adopt(&engine.0);
-        tree.adopt(&ssh.0);
 
         let (tx, rx) = mpsc::channel::<Msg>();
         let tap = Arc::new(Mutex::new(Tap::default()));
-        let router = Arc::new(Router::new(
+        let router = Arc::new(Router::with_lock(
             self.cfg.app_tools.as_ref().map(|h| h.0.clone()),
+            LockSeat {
+                lock: self.cfg.lock.clone(),
+                env_id: self.cfg.env_id.clone(),
+                label: self.cfg.env_label.clone(),
+            },
         ));
-        // Engine answers and the app's own answers share the way to the Environment.
-        let to_environment = Arc::new(Mutex::new(ssh.0.stdin.take().expect("piped")));
         let mut threads = Vec::new();
+        // To the engine: its own writer, so a slow engine never stalls the socket.
+        let (to_engine, engine_inbox) = mpsc::channel::<Vec<u8>>();
         {
-            let from = ssh.0.stdout.take().expect("piped");
-            let mut to = engine.0.stdin.take().expect("piped");
-            let tap = tap.clone();
-            let tx = tx.clone();
-            let router = router.clone();
-            let to_environment = to_environment.clone();
+            let mut stdin = engine.0.stdin.take().expect("piped");
             threads.push(std::thread::spawn(move || {
-                let mut first = true;
-                for_each_line(from, |line| {
-                    if first {
-                        first = false;
-                        let _ = tx.send(Msg::EnvironmentSpoke);
-                    }
-                    match router.route_environment_line(line) {
-                        Route::Engine => {
-                            for e in tap.lock().unwrap().from_environment(line) {
-                                let _ = tx.send(Msg::Tap(e));
-                            }
-                            to.write_all(line).and_then(|_| to.flush()).is_ok()
-                        }
-                        Route::Local {
-                            id,
-                            name,
-                            arguments,
-                        } => {
-                            let Some(tools) = router.tools().cloned() else {
-                                return true;
-                            };
-                            let tx = tx.clone();
-                            let to_environment = to_environment.clone();
-                            // Its own thread: an update check may take a while
-                            // and the Environment's pings must keep flowing.
-                            std::thread::spawn(move || {
-                                let started = Instant::now();
-                                let app = arguments["app"].as_str().map(str::to_string);
-                                let _ = tx.send(Msg::Tap(TapEvent::ToolStarted {
-                                    tool: name.clone(),
-                                    app,
-                                }));
-                                let result = tools.call(&name, &arguments);
-                                let ok = !result["isError"].as_bool().unwrap_or(false);
-                                let answer =
-                                    serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
-                                let mut bytes = serde_json::to_vec(&answer).unwrap_or_default();
-                                bytes.push(b'\n');
-                                let mut out = to_environment.lock().unwrap();
-                                let _ = out.write_all(&bytes).and_then(|_| out.flush());
-                                drop(out);
-                                let _ = tx.send(Msg::Tap(TapEvent::ToolFinished {
-                                    tool: name,
-                                    ok,
-                                    ms: started.elapsed().as_millis() as u64,
-                                }));
-                            });
-                            true
-                        }
-                    }
-                });
-            }));
-        }
-        {
-            let from = engine.0.stdout.take().expect("piped");
-            let tap = tap.clone();
-            let tx = tx.clone();
-            let router = router.clone();
-            let to_environment = to_environment.clone();
-            threads.push(std::thread::spawn(move || {
-                for_each_line(from, |line| {
-                    for e in tap.lock().unwrap().from_engine(line) {
-                        let _ = tx.send(Msg::Tap(e));
-                    }
-                    let line = router.rewrite_engine_line(line);
-                    let mut out = to_environment.lock().unwrap();
-                    out.write_all(&line).and_then(|_| out.flush()).is_ok()
-                });
-            }));
-        }
-        drop(tx);
-        let stderr_tail = Arc::new(Mutex::new(Vec::<u8>::new()));
-        {
-            let mut err = ssh.0.stderr.take().expect("piped");
-            let tail = stderr_tail.clone();
-            threads.push(std::thread::spawn(move || {
-                let mut buf = [0u8; 1024];
-                while let Ok(n) = err.read(&mut buf) {
-                    if n == 0 {
+                for line in engine_inbox {
+                    if stdin.write_all(&line).and_then(|_| stdin.flush()).is_err() {
                         break;
-                    }
-                    let mut t = tail.lock().unwrap();
-                    t.extend_from_slice(&buf[..n]);
-                    let len = t.len();
-                    if len > 8192 {
-                        t.drain(..len - 8192);
                     }
                 }
             }));
         }
+        // From the engine: one line, one frame.
+        {
+            let stdout = engine.0.stdout.take().expect("piped");
+            let tap = tap.clone();
+            let tx = tx.clone();
+            let router = router.clone();
+            threads.push(std::thread::spawn(move || {
+                for_each_line(stdout, |line| {
+                    for e in tap.lock().unwrap().from_engine(line) {
+                        let _ = tx.send(Msg::Tap(e));
+                    }
+                    let line = router.rewrite_engine_line(line);
+                    let text = String::from_utf8_lossy(&line).trim_end().to_string();
+                    tx.send(Msg::Out(text)).is_ok()
+                });
+            }));
+        }
 
-        let mut key_file = Some(key_file);
+        let _ = socket.get_ref().set_read_timeout(Duration::from_millis(20));
         let mut initialized = false;
         let mut connected_at = Instant::now();
         let mut streak_since_ms = 0u64;
         let mut last_activity: Option<Instant> = None;
         let mut current_tool: Option<(String, Option<String>)> = None;
         let mut ended_by: Option<Reason> = None;
+        let mut last_heard = Instant::now();
+        let mut last_ping = Instant::now();
 
-        loop {
-            match rx.recv_timeout(Duration::from_millis(100)) {
-                Ok(Msg::EnvironmentSpoke) => key_file = None,
-                Ok(Msg::Tap(TapEvent::Initialized)) => {
-                    initialized = true;
-                    connected_at = Instant::now();
-                    self.history.record(&self.cfg.env_id, Event::Connected);
-                    self.set_status(ChannelStatus::new(State::Connected));
-                }
-                Ok(Msg::Tap(TapEvent::ToolStarted { tool, app })) => {
-                    if last_activity.is_none() {
-                        streak_since_ms = now_ms();
+        'session: loop {
+            // What the engine and the app's own tools want to say.
+            loop {
+                match rx.try_recv() {
+                    Ok(Msg::Out(text)) => {
+                        if socket.send(Message::text(text)).is_err() {
+                            ended_by = Some(Reason::Offline);
+                            break 'session;
+                        }
                     }
-                    last_activity = Some(Instant::now());
-                    current_tool = Some((tool, app));
+                    Ok(Msg::Tap(TapEvent::Initialized)) => {
+                        initialized = true;
+                        connected_at = Instant::now();
+                        self.history.record(&self.cfg.env_id, Event::Connected);
+                        self.set_status(ChannelStatus::new(State::Connected));
+                    }
+                    Ok(Msg::Tap(TapEvent::ToolStarted { tool, app })) => {
+                        if last_activity.is_none() {
+                            streak_since_ms = now_ms();
+                        }
+                        last_activity = Some(Instant::now());
+                        current_tool = Some((tool, app));
+                    }
+                    Ok(Msg::Tap(TapEvent::ToolFinished { tool, ok, ms })) => {
+                        last_activity = Some(Instant::now());
+                        self.finish_tool(&router, tool, ok, ms);
+                    }
+                    Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
                 }
-                Ok(Msg::Tap(TapEvent::ToolFinished { tool, ok, ms })) => {
-                    last_activity = Some(Instant::now());
-                    self.history.append(HistoryEntry {
-                        ts: rfc3339(now_ms()),
-                        env: self.cfg.env_id.clone(),
-                        event: Event::Tool,
-                        tool: Some(tool),
-                        ok: Some(ok),
-                        ms: Some(ms),
-                        reason: None,
-                    });
+            }
+
+            // What the Environment says.
+            match socket.read() {
+                Ok(Message::Text(text)) => {
+                    last_heard = Instant::now();
+                    let mut line = text.as_bytes().to_vec();
+                    match router.route_environment_line(&line) {
+                        Route::Engine => {
+                            for e in tap.lock().unwrap().from_environment(&line) {
+                                let _ = tx.send(Msg::Tap(e));
+                            }
+                            line.push(b'\n');
+                            let _ = to_engine.send(line);
+                        }
+                        Route::Refuse { id, holder } => {
+                            let answer = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": id,
+                                "result": crate::app_tools::text_result(busy_message(&holder), true),
+                            });
+                            let _ = tx.send(Msg::Out(answer.to_string()));
+                        }
+                        Route::Local {
+                            id,
+                            name,
+                            arguments,
+                        } => {
+                            if let Some(tools) = router.tools().cloned() {
+                                let tx = tx.clone();
+                                // Its own thread: an update check may take a while
+                                // and the Environment's pings must keep flowing.
+                                std::thread::spawn(move || {
+                                    let started = Instant::now();
+                                    let app = arguments["app"].as_str().map(str::to_string);
+                                    let _ = tx.send(Msg::Tap(TapEvent::ToolStarted {
+                                        tool: name.clone(),
+                                        app,
+                                    }));
+                                    let result = tools.call(&name, &arguments);
+                                    let ok = !result["isError"].as_bool().unwrap_or(false);
+                                    let answer = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result});
+                                    let _ = tx.send(Msg::Out(answer.to_string()));
+                                    let _ = tx.send(Msg::Tap(TapEvent::ToolFinished {
+                                        tool: name,
+                                        ok,
+                                        ms: started.elapsed().as_millis() as u64,
+                                    }));
+                                });
+                            }
+                        }
+                    }
                 }
-                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {}
+                Ok(Message::Close(_)) => break 'session,
+                Ok(_) => last_heard = Instant::now(),
+                Err(tungstenite::Error::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                    break 'session
+                }
+                Err(_) => {
+                    ended_by = Some(Reason::Offline);
+                    break 'session;
+                }
+            }
+
+            // Keep-alive.
+            if last_heard.elapsed() >= timing.dead_after {
+                ended_by = Some(Reason::Offline);
+                break;
+            }
+            if last_ping.elapsed() >= timing.ping_every {
+                last_ping = Instant::now();
+                if socket.send(Message::Ping(Vec::new().into())).is_err() {
+                    ended_by = Some(Reason::Offline);
+                    break;
+                }
             }
 
             if initialized {
@@ -572,27 +626,20 @@ impl Worker {
                     self.set_status(ChannelStatus::new(State::Connected));
                 }
             }
-            if key_file
-                .as_ref()
-                .is_some_and(|k| k.created.elapsed() >= KEY_FILE_MAX_AGE)
-            {
-                key_file = None;
-            }
             if let Some(reason) = self.end_requested() {
                 ended_by = Some(reason);
                 break;
             }
-            if matches!(ssh.0.try_wait(), Ok(Some(_))) || matches!(engine.0.try_wait(), Ok(Some(_)))
-            {
-                // Let the pumps hand over what is still in flight.
-                std::thread::sleep(Duration::from_millis(200));
+            if matches!(engine.0.try_wait(), Ok(Some(_))) {
+                ended_by = Some(Reason::Error);
                 break;
             }
         }
 
-        drop(key_file);
+        let _ = socket.close(None);
+        let _ = flush_close(&mut socket);
+        drop(to_engine);
         tree.end(TREE_END_TIMEOUT);
-        let ssh_status = ssh.finish();
         engine.finish();
         for t in threads {
             let _ = t.join();
@@ -601,19 +648,11 @@ impl Worker {
         // in the history.
         while let Ok(msg) = rx.try_recv() {
             if let Msg::Tap(TapEvent::ToolFinished { tool, ok, ms }) = msg {
-                self.history.append(HistoryEntry {
-                    ts: rfc3339(now_ms()),
-                    env: self.cfg.env_id.clone(),
-                    event: Event::Tool,
-                    tool: Some(tool),
-                    ok: Some(ok),
-                    ms: Some(ms),
-                    reason: None,
-                });
+                self.finish_tool(&router, tool, ok, ms);
             }
         }
-        let stderr = String::from_utf8_lossy(&stderr_tail.lock().unwrap()).to_string();
-        let reason = ended_by.unwrap_or_else(|| classify(&stderr, initialized, ssh_status));
+        self.cfg.lock.release(&self.cfg.env_id);
+        let reason = ended_by.unwrap_or(Reason::Ended);
         if initialized {
             let mut entry = HistoryEntry::new(&self.cfg.env_id, Event::Disconnected);
             entry.reason = Some(reason.code().into());
@@ -629,6 +668,33 @@ impl Worker {
             reason,
         }
     }
+
+    fn finish_tool(&self, router: &Router, tool: String, ok: bool, ms: u64) {
+        if router.holds_for(&tool) {
+            self.cfg.lock.end_call(&self.cfg.env_id);
+        }
+        self.history.append(HistoryEntry {
+            ts: rfc3339(now_ms()),
+            env: self.cfg.env_id.clone(),
+            event: Event::Tool,
+            tool: Some(tool),
+            ok: Some(ok),
+            ms: Some(ms),
+            reason: None,
+        });
+    }
+}
+
+/// Lets the close frame go out before the socket is dropped.
+fn flush_close(socket: &mut Socket) -> tungstenite::Result<()> {
+    let deadline = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < deadline {
+        match socket.read() {
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    Ok(())
 }
 
 /// Calls `handle` with every line (newline included) until EOF, an error, or
@@ -649,7 +715,7 @@ fn for_each_line(from: impl Read, mut handle: impl FnMut(&[u8]) -> bool) {
     }
 }
 
-/// Kills the child when dropped, so no path leaves `ssh` or the engine running.
+/// Kills the child when dropped, so no path leaves the engine running.
 struct Kill(Child);
 
 impl Kill {
@@ -666,134 +732,6 @@ impl Drop for Kill {
     fn drop(&mut self) {
         let _ = self.0.kill();
         let _ = self.0.wait();
-    }
-}
-
-/// The private key as a file only the user can read, deleted on drop.
-struct KeyFile {
-    path: PathBuf,
-    created: Instant,
-}
-
-impl KeyFile {
-    fn create(dir: &Path, env_id: &str, pem: &[u8]) -> std::io::Result<Self> {
-        let mut raw = [0u8; 8];
-        OsRng.fill_bytes(&mut raw);
-        let suffix: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-        let path = dir.join(format!("{env_id}-{suffix}.key"));
-        write_private_file(&path, pem)?;
-        Ok(Self {
-            path,
-            created: Instant::now(),
-        })
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for KeyFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// The OpenSSH command line from the contract, plus options that keep the
-/// session independent of any user configuration.
-pub fn ssh_args(
-    target: &SshTarget,
-    known_hosts_file: &Path,
-    key_file: &Path,
-    extra: &[String],
-) -> Vec<OsString> {
-    let kh = ssh_path_value(known_hosts_file);
-    let mut args: Vec<OsString> = vec!["-F".into(), "none".into(), "-T".into()];
-    args.push("-i".into());
-    args.push(ssh_escape_tokens(&key_file.to_string_lossy()).into());
-    for opt in [
-        "IdentitiesOnly=yes".to_string(),
-        "IdentityAgent=none".to_string(),
-        "BatchMode=yes".to_string(),
-        "PreferredAuthentications=publickey".to_string(),
-        format!("UserKnownHostsFile={kh}"),
-        format!("GlobalKnownHostsFile={kh}"),
-        "StrictHostKeyChecking=yes".to_string(),
-        "UpdateHostKeys=no".to_string(),
-        "ClearAllForwardings=yes".to_string(),
-        "ForwardAgent=no".to_string(),
-        "ForwardX11=no".to_string(),
-        "ServerAliveInterval=15".to_string(),
-        "ServerAliveCountMax=2".to_string(),
-        "ConnectTimeout=20".to_string(),
-        "LogLevel=ERROR".to_string(),
-    ]
-    .into_iter()
-    .chain(extra.iter().cloned())
-    {
-        args.push("-o".into());
-        args.push(opt.into());
-    }
-    args.push("-p".into());
-    args.push(target.port.to_string().into());
-    args.push("-l".into());
-    args.push(target.user.clone().into());
-    args.push("--".into());
-    args.push(target.host.clone().into());
-    args
-}
-
-/// `-o Key=value` values are split on whitespace and expand `%` tokens, and
-/// app data paths contain spaces ("Application Support"), so quote them.
-fn ssh_path_value(path: &Path) -> String {
-    let mut s = path.to_string_lossy().to_string();
-    if cfg!(windows) {
-        s = s.replace('\\', "/");
-    }
-    format!("\"{}\"", ssh_escape_tokens(&s).replace('"', "\\\""))
-}
-
-fn ssh_escape_tokens(s: &str) -> String {
-    s.replace('%', "%%")
-}
-
-fn classify(stderr: &str, initialized: bool, exit: Option<i32>) -> Reason {
-    let s = stderr.to_ascii_lowercase();
-    let has = |needles: &[&str]| needles.iter().any(|n| s.contains(n));
-    if has(&[
-        "host key verification failed",
-        "remote host identification has changed",
-        "no matching host key",
-    ]) {
-        Reason::HostKey
-    } else if has(&["permission denied"]) {
-        Reason::NotAuthorized
-    } else if has(&[
-        "already attached",
-        "already connected",
-        "už připojen",
-        "jinou relací",
-    ]) {
-        Reason::AlreadyConnected
-    } else if has(&[
-        "could not resolve hostname",
-        "name or service not known",
-        "nodename nor servname",
-        "no such host",
-        "no route to host",
-        "network is unreachable",
-        "timed out",
-        "connection refused",
-        "connection reset",
-        "connection closed",
-        "broken pipe",
-        "not responding",
-    ]) {
-        Reason::Offline
-    } else if initialized || exit == Some(0) {
-        Reason::Ended
-    } else {
-        Reason::Error
     }
 }
 
@@ -822,80 +760,28 @@ impl Backoff {
 mod tests {
     use super::*;
 
-    fn target() -> SshTarget {
-        SshTarget {
-            host: "env.tailnet.example.com".into(),
-            user: "env".into(),
-            port: 22,
-            known_hosts: vec![],
-        }
-    }
-
     #[test]
-    fn command_line_follows_the_contract() {
-        let args: Vec<String> = ssh_args(
-            &target(),
-            Path::new(
-                "/Users/x/Library/Application Support/io.lazurio.agent-desktop/known_hosts/a",
-            ),
-            Path::new("/tmp/k%1.key"),
-            &[],
-        )
-        .into_iter()
-        .map(|a| a.into_string().unwrap())
-        .collect();
-        let joined = args.join(" ");
-        assert!(joined.starts_with("-F none -T -i /tmp/k%%1.key"));
-        for opt in [
-            "IdentitiesOnly=yes",
-            "IdentityAgent=none",
-            "BatchMode=yes",
-            "StrictHostKeyChecking=yes",
-            "ClearAllForwardings=yes",
-            "ForwardAgent=no",
-            "ServerAliveInterval=15",
-            "ServerAliveCountMax=2",
-        ] {
-            assert!(args.iter().any(|a| a == opt), "{opt}");
-        }
-        assert!(args.contains(
-            &"UserKnownHostsFile=\"/Users/x/Library/Application Support/io.lazurio.agent-desktop/known_hosts/a\""
-                .to_string()
-        ));
+    fn maps_wire_errors_to_reasons() {
         assert_eq!(
-            &args[args.len() - 6..],
-            ["-p", "22", "-l", "env", "--", "env.tailnet.example.com"]
-        );
-    }
-
-    #[test]
-    fn classifies_ssh_errors() {
-        assert_eq!(
-            classify("Host key verification failed.\r\n", false, Some(255)),
-            Reason::HostKey
+            Reason::from_wire(&WireError::Http(404)),
+            Reason::Unsupported
         );
         assert_eq!(
-            classify("x@y: Permission denied (publickey).", false, Some(255)),
+            Reason::from_wire(&WireError::Denied("already-attached".into())),
+            Reason::AlreadyConnected
+        );
+        assert_eq!(
+            Reason::from_wire(&WireError::Denied("bad-signature".into())),
             Reason::NotAuthorized
         );
         assert_eq!(
-            classify(
-                "ssh: Could not resolve hostname h: nodename nor servname provided",
-                false,
-                Some(255)
-            ),
-            Reason::Offline
+            Reason::from_wire(&WireError::Certificate("x".into())),
+            Reason::Certificate
         );
         assert_eq!(
-            classify(
-                "Počítač x je už připojený jinou relací. (Computer x is already attached in another session.)",
-                false,
-                Some(2)
-            ),
-            Reason::AlreadyConnected
+            Reason::from_wire(&WireError::Offline("x".into())),
+            Reason::Offline
         );
-        assert_eq!(classify("", true, Some(0)), Reason::Ended);
-        assert_eq!(classify("", false, Some(1)), Reason::Error);
     }
 
     #[test]

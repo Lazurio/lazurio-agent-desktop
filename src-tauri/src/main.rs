@@ -463,11 +463,11 @@ fn main() {
             let manager = Manager::open(
                 ManagerConfig {
                     data_dir: data_dir.clone(),
-                    ssh_program: platform::default_ssh_program(),
                     engine: engine_spec(),
                     computer_name: platform::computer_name(),
                     os: platform::os_name().into(),
-                    extra_ssh_options: Vec::new(),
+                    timing: lazurio_agent_desktop_core::channel::Timing::default(),
+                    hold_after_last_call: lazurio_agent_desktop_core::lock::HOLD_AFTER_LAST_CALL,
                     app_tools: Some(AppToolsHandle(Arc::new(updates::AgentTools {
                         app: app.handle().clone(),
                     }))),
