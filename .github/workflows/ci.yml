@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  TAURI_CLI_VERSION: 2.12.4
+
+jobs:
+  core:
+    name: Core (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, target: x86_64-unknown-linux-gnu }
+          - { os: macos-15, target: aarch64-apple-darwin }
+          - { os: macos-15-intel, target: x86_64-apple-darwin }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        shell: bash
+        run: rustup toolchain install 2>/dev/null || rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: core-${{ matrix.target }}
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+      - name: latest.json builder self-test
+        if: runner.os == 'Linux'
+        run: python3 -I scripts/latest_json.py --self-test
+      - name: Clippy
+        run: cargo clippy --locked -p lazurio-agent-desktop-core -p lazurio-agent-desktop-testkit --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --locked -p lazurio-agent-desktop-core -p lazurio-agent-desktop-testkit
+
+  app:
+    name: App
+    uses: ./.github/workflows/build-app.yml
+    with:
+      release: false
+    secrets: inherit

@@ -1,0 +1,214 @@
+name: Build app
+
+# Builds, tests and bundles the app for every target. CI runs it on each pull
+# request; the release workflow runs it for a tag and publishes the result.
+on:
+  workflow_call:
+    inputs:
+      release:
+        description: Release build; the updater signing key is then required.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TAURI_CLI_VERSION: 2.12.4
+
+jobs:
+  app:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, target: aarch64-apple-darwin, bundles: "app,dmg" }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, bundles: "app,dmg" }
+          - { os: windows-2025, target: x86_64-pc-windows-msvc, bundles: "msi,nsis" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: app-${{ matrix.target }}
+          workspaces: |
+            . -> target
+            .engine-src -> target
+      - name: Build the Agent Desktop engine (pinned fork commit)
+        shell: bash
+        run: scripts/build-engine.sh ${{ matrix.target }}
+      - name: App toolchain
+        shell: bash
+        run: |
+          rustup toolchain install 2>/dev/null || rustup show
+          rustup target add ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Clippy (app)
+        run: cargo clippy --locked -p lazurio-agent-desktop --all-targets --target ${{ matrix.target }} -- -D warnings
+      - name: Test (app, updater against a local latest.json)
+        run: cargo test --locked -p lazurio-agent-desktop --target ${{ matrix.target }}
+
+      # Signing switches on by itself once the secrets exist; until then the
+      # macOS build is ad-hoc signed and the Windows build unsigned (internal tests only).
+      - name: macOS signing and notarization (with secrets only)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+            {
+              echo "APPLE_CERTIFICATE<<LAD_EOF"; echo "$APPLE_CERTIFICATE"; echo "LAD_EOF"
+              echo "APPLE_CERTIFICATE_PASSWORD<<LAD_EOF"; echo "$APPLE_CERTIFICATE_PASSWORD"; echo "LAD_EOF"
+              echo "APPLE_SIGNING_IDENTITY<<LAD_EOF"; echo "$APPLE_SIGNING_IDENTITY"; echo "LAD_EOF"
+            } >> "$GITHUB_ENV"
+            echo "Signing with Developer ID."
+          else
+            echo "No Developer ID certificate: ad-hoc signed build for internal tests."
+          fi
+          if [ -n "$APPLE_API_KEY_P8" ] && [ -n "$APPLE_API_KEY" ] && [ -n "$APPLE_API_ISSUER" ]; then
+            key_path="$RUNNER_TEMP/AuthKey_$APPLE_API_KEY.p8"
+            printf '%s\n' "$APPLE_API_KEY_P8" > "$key_path"
+            {
+              echo "APPLE_API_ISSUER=$APPLE_API_ISSUER"
+              echo "APPLE_API_KEY=$APPLE_API_KEY"
+              echo "APPLE_API_KEY_PATH=$key_path"
+            } >> "$GITHUB_ENV"
+            echo "Notarizing with an App Store Connect API key."
+          fi
+      - name: Windows signing (with secrets only)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) { "No Windows certificate: unsigned build for internal tests."; exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $conf = @{ bundle = @{ windows = @{
+            certificateThumbprint = $cert.Thumbprint
+            digestAlgorithm = "sha256"
+            timestampUrl = "http://timestamp.digicert.com"
+          } } } | ConvertTo-Json -Depth 5
+          Set-Content -Path src-tauri/tauri.signing.conf.json -Value $conf
+          "TAURI_SIGNING_ARGS=--config src-tauri/tauri.signing.conf.json" >> $env:GITHUB_ENV
+          "Signing with certificate $($cert.Subject)."
+
+      - name: Build the app
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        # hdiutil on hosted macOS runners sometimes cannot eject the dmg it just
+        # built ("Resource busy"); a second attempt passes.
+        run: |
+          extra=()
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            if [ "${{ inputs.release }}" = "true" ]; then
+              echo "::error::A release needs the updater signing key (secret TAURI_SIGNING_PRIVATE_KEY)."
+              exit 1
+            fi
+            # Pull requests from forks get no secrets: build without update packages.
+            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+            echo '{"bundle":{"createUpdaterArtifacts":false}}' > src-tauri/tauri.noupdater.conf.json
+            extra=(--config src-tauri/tauri.noupdater.conf.json)
+            echo "::warning::No updater signing key: building without update packages."
+          fi
+          bundles="${{ matrix.bundles }}"
+          version=$(sed -n 's/^ *"version": *"\(.*\)",$/\1/p' src-tauri/tauri.conf.json | head -1)
+          if [ "$RUNNER_OS" = "Windows" ] && [[ "$version" == *-* ]]; then
+            # WiX (MSI) only takes numeric pre-release parts; pre-releases ship the NSIS installer.
+            bundles=nsis
+          fi
+          echo "version $version, bundles $bundles"
+          for attempt in 1 2 3; do
+            npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" build --ci --target ${{ matrix.target }} --bundles "$bundles" ${TAURI_SIGNING_ARGS:-} "${extra[@]}" && exit 0
+            echo "::warning::bundling attempt $attempt failed"
+            sleep 15
+          done
+          exit 1
+      - name: Update packages are signed for this version
+        shell: bash
+        run: |
+          shopt -s nullglob
+          py=python3; [ "$RUNNER_OS" = "Windows" ] && py=python
+          version=$($py -c "import json;print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          sigs=(target/${{ matrix.target }}/release/bundle/*/*.sig)
+          if [ ${#sigs[@]} -eq 0 ]; then
+            if [ "${{ inputs.release }}" = "true" ]; then echo "::error::no update packages"; exit 1; fi
+            echo "No update packages in this build."; exit 0
+          fi
+          for sig in "${sigs[@]}"; do
+            test -f "${sig%.sig}"
+            comment=$($py -c "import base64,sys;print([l for l in base64.b64decode(open(sys.argv[1]).read()).decode().splitlines() if l.startswith('trusted comment:')][0])" "$sig")
+            echo "$(basename "$sig"): $comment"
+            # The app requires the signed version (requireSignedVersion).
+            echo "$comment" | grep -q "version:$version"
+          done
+      - name: Update over a running installation (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $new = Get-ChildItem "target/${{ matrix.target }}/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          # The first pilot release has no pre-install hook: the situation on the pilot computer.
+          $old = Join-Path $env:RUNNER_TEMP "old-setup.exe"
+          gh release download v0.1.0-pilot.1 --repo "${{ github.repository }}" --pattern "*x64-setup.exe" --output $old --clobber
+          $oldArg = if (Test-Path $old) { $old } else { "" }
+          ./scripts/windows-update-test.ps1 -NewInstaller $new.FullName -BuildDir (Resolve-Path "target/${{ matrix.target }}/release").Path -OldInstaller $oldArg
+      - name: Screens of the update test (Windows)
+        if: always() && runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-update-test-screens
+          path: ${{ runner.temp }}/update-test-*.png
+          if-no-files-found: ignore
+      - name: The bundled engine answers MCP initialize
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            *-apple-darwin)
+              dir="target/${{ matrix.target }}/release/bundle/macos/Lazurio Agent Desktop.app/Contents/MacOS"
+              ls -l "$dir"
+              test -x "$dir/agent-desktop-macos-helper"
+              engine="$dir/agent-desktop" ;;
+            *) engine="target/${{ matrix.target }}/release/agent-desktop.exe" ;;
+          esac
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            '{"jsonrpc":"2.0","id":2,"method":"ping"}' > requests.jsonl
+          set +e
+          "$engine" mcp < requests.jsonl > answers.jsonl 2> engine.err
+          code=$?
+          set -e
+          echo "exit status: $code"
+          echo "--- stderr"; head -c 4000 engine.err; echo
+          echo "--- stdout"; head -c 4000 answers.jsonl; echo
+          grep -q '"serverInfo"' answers.jsonl
+          grep '"id":2' answers.jsonl | grep -q '"result"'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lazurio-agent-desktop-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+            target/${{ matrix.target }}/release/bundle/msi/*.msi
+            target/${{ matrix.target }}/release/bundle/msi/*.msi.sig
+            target/${{ matrix.target }}/release/bundle/nsis/*.exe
+            target/${{ matrix.target }}/release/bundle/nsis/*.exe.sig
