@@ -190,26 +190,26 @@ fn serves_the_app_tools_next_to_the_engine() {
 #[test]
 fn one_agent_at_a_time_across_environments() {
     let dir = tempfile::tempdir().unwrap();
-    // Spectoda's agent works first and keeps its session; Lumbio's agent tries a second later.
+    // Environment A's agent works first and keeps its session; Environment B's agent tries a second later.
     let first = FakeEnvironment::start(
         EnvOptions {
-            environment: "env-spectoda".into(),
+            environment: "env-a".into(),
             hold: Duration::from_secs(10),
             ..EnvOptions::default()
         },
-        dir.path().join("spectoda.jsonl"),
+        dir.path().join("a.jsonl"),
     );
     let second = FakeEnvironment::start(
         EnvOptions {
-            environment: "env-lumbio".into(),
+            environment: "env-b".into(),
             call_delay: Duration::from_secs(1),
             hold: Duration::from_secs(10),
             ..EnvOptions::default()
         },
-        dir.path().join("lumbio.jsonl"),
+        dir.path().join("b.jsonl"),
     );
-    let lp1 = common::launchpad_for(&first, "test-computer", Some("Spectoda"));
-    let lp2 = common::launchpad_for(&second, "test-computer", Some("Lumbio"));
+    let lp1 = common::launchpad_for(&first, "test-computer", Some("Prostředí A"));
+    let lp2 = common::launchpad_for(&second, "test-computer", Some("Prostředí B"));
     let (manager, _) = common::open(dir.path(), Setup::default());
     let a = common::pair(&manager, &lp1.origin);
     assert!(wait(20, || lines(&first.out) >= 1));
@@ -221,14 +221,14 @@ fn one_agent_at_a_time_across_environments() {
     let text = refused["c1_text"]
         .as_str()
         .unwrap_or_else(|| panic!("{refused}"));
-    assert!(text.contains("ovládá agent z Spectoda"), "{text}");
-    // The panel tells Lumbio who works now; Spectoda itself sees nobody else.
+    assert!(text.contains("ovládá agent z Prostředí A"), "{text}");
+    // The panel tells Environment B who works now; Environment A itself sees nobody else.
     let views = manager.environments();
     let view_a = views.iter().find(|e| e.id == a.id).unwrap();
     let view_b = views.iter().find(|e| e.id == b.id).unwrap();
-    assert_eq!(view_b.controlled_by.as_deref(), Some("Spectoda"));
+    assert_eq!(view_b.controlled_by.as_deref(), Some("Prostředí A"));
     assert_eq!(view_a.controlled_by, None);
-    assert_eq!(manager.controlled_by().unwrap().label, "Spectoda");
+    assert_eq!(manager.controlled_by().unwrap().label, "Prostředí A");
     manager.shutdown();
 }
 

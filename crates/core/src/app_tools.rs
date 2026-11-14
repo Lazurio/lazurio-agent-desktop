@@ -362,13 +362,13 @@ mod tests {
             env_id: id.into(),
             label: label.into(),
         };
-        let a = Router::with_lock(Some(Arc::new(Fake)), seat("a", "Spectoda"));
-        let b = Router::with_lock(Some(Arc::new(Fake)), seat("b", "Lumbio"));
+        let a = Router::with_lock(Some(Arc::new(Fake)), seat("a", "Prostředí A"));
+        let b = Router::with_lock(Some(Arc::new(Fake)), seat("b", "Prostředí B"));
         let call =
             br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_click"}}"#;
         assert!(matches!(a.route_environment_line(call), Route::Engine));
         match b.route_environment_line(call) {
-            Route::Refuse { holder, .. } => assert_eq!(holder.label, "Spectoda"),
+            Route::Refuse { holder, .. } => assert_eq!(holder.label, "Prostředí A"),
             _ => panic!("b must be refused while a works"),
         }
         // The status tool still answers for b, so its agent can see who works.

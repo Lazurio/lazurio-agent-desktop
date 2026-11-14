@@ -145,19 +145,19 @@ mod tests {
     #[test]
     fn one_environment_at_a_time() {
         let lock = ComputerLock::with_linger(Duration::from_millis(100));
-        lock.try_begin("a", "Spectoda").unwrap();
-        lock.try_begin("a", "Spectoda").unwrap();
-        let refused = lock.try_begin("b", "Lumbio").unwrap_err();
-        assert_eq!(refused.label, "Spectoda");
-        assert!(busy_message(&refused).contains("ovládá agent z Spectoda"));
+        lock.try_begin("a", "Prostředí A").unwrap();
+        lock.try_begin("a", "Prostředí A").unwrap();
+        let refused = lock.try_begin("b", "Prostředí B").unwrap_err();
+        assert_eq!(refused.label, "Prostředí A");
+        assert!(busy_message(&refused).contains("ovládá agent z Prostředí A"));
         lock.end_call("a");
         lock.end_call("a");
         // Still held right after the last call...
-        assert!(lock.try_begin("b", "Lumbio").is_err());
+        assert!(lock.try_begin("b", "Prostředí B").is_err());
         std::thread::sleep(Duration::from_millis(150));
         // ...and free once the hold has passed.
         assert_eq!(lock.holder(), None);
-        lock.try_begin("b", "Lumbio").unwrap();
+        lock.try_begin("b", "Prostředí B").unwrap();
         assert_eq!(lock.holder().unwrap().env_id, "b");
     }
 
