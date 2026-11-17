@@ -10,6 +10,7 @@ use std::time::Duration;
 
 #[test]
 fn serves_mcp_reconnects_and_obeys_the_switch() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let env = FakeEnvironment::start(EnvOptions::default(), dir.path().join("agent.jsonl"));
     let lp = common::launchpad_for(&env, "test-computer", None);
@@ -66,6 +67,7 @@ fn serves_mcp_reconnects_and_obeys_the_switch() {
 
 #[test]
 fn reconnects_when_the_environment_stops_answering_pings() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let env = FakeEnvironment::start(
         EnvOptions {
@@ -84,6 +86,7 @@ fn reconnects_when_the_environment_stops_answering_pings() {
 
 #[test]
 fn pings_while_the_environment_holds_the_session() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let env = FakeEnvironment::start(
         EnvOptions {
@@ -103,6 +106,7 @@ fn pings_while_the_environment_holds_the_session() {
 
 #[test]
 fn stop_ends_the_session_and_comes_back() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let env = FakeEnvironment::start(
         EnvOptions {
@@ -140,6 +144,7 @@ fn stop_ends_the_session_and_comes_back() {
 
 #[test]
 fn reports_why_the_environment_refused() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let env = FakeEnvironment::start(
         EnvOptions {
@@ -160,6 +165,7 @@ fn reports_why_the_environment_refused() {
 
 #[test]
 fn serves_the_app_tools_next_to_the_engine() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let env = FakeEnvironment::start(EnvOptions::default(), dir.path().join("agent.jsonl"));
     let lp = common::launchpad_for(&env, "test-computer", None);
@@ -191,6 +197,7 @@ fn serves_the_app_tools_next_to_the_engine() {
 
 #[test]
 fn one_agent_at_a_time_across_environments() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     // Environment A's agent works first and keeps its session; Environment B's agent tries a second later.
     let first = FakeEnvironment::start(
@@ -236,6 +243,7 @@ fn one_agent_at_a_time_across_environments() {
 
 #[test]
 fn refuses_every_call_while_another_lazurio_app_holds_the_computer() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     // Lazurio App holds the device lock of this test's manager: the same file, the same mechanism.
     let place = common::device_lock_in(dir.path());
@@ -292,6 +300,7 @@ fn refuses_every_call_while_another_lazurio_app_holds_the_computer() {
 
 #[test]
 fn runs_commands_only_after_the_owner_turns_them_on() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let env = FakeEnvironment::start(
         EnvOptions {
@@ -345,6 +354,7 @@ fn runs_commands_only_after_the_owner_turns_them_on() {
 /// is set (`scripts/build-engine.sh` or a local build of the fork).
 #[test]
 fn real_engine_over_the_channel() {
+    let _serial = common::serial();
     let Some(engine) = common::real_engine() else {
         eprintln!("skipping: LAD_ENGINE is not set");
         return;

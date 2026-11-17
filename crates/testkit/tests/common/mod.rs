@@ -169,3 +169,15 @@ pub fn first_line(path: &Path) -> serde_json::Value {
 pub fn wait(timeout_s: u64, check: impl FnMut() -> bool) -> bool {
     wait_until(Duration::from_secs(timeout_s), check)
 }
+
+/// Runs the tests of one test binary one at a time. A test that starts a process (an engine)
+/// hands that child every descriptor of this process until its `exec`, and `flock` belongs to the
+/// open file, so for that moment the child also holds the device lock another test thread has
+/// just taken, and that test sees "another Lazurio app" (Lazurio/lazurio-app#29). Every test that
+/// takes the device lock or starts a process takes this guard first.
+pub fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}

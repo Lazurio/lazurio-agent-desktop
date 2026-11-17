@@ -73,6 +73,7 @@ impl MainThread {
 
 #[test]
 fn quitting_while_a_channel_waits_for_the_main_thread_does_not_hang() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     // The agent calls its tools and keeps the session, so its Environment
     // holds the computer when the owner quits.
@@ -141,6 +142,7 @@ fn quitting_while_a_channel_waits_for_the_main_thread_does_not_hang() {
 
 #[test]
 fn quitting_does_not_wait_for_a_channel_that_is_still_connecting() {
+    let _serial = common::serial();
     // Accepts the connection and never answers the WebSocket upgrade: the
     // channel sits in its handshake for the whole connect timeout.
     let silent = TcpListener::bind("127.0.0.1:0").unwrap();

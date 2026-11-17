@@ -21,6 +21,7 @@ fn approval(channel_url: Option<String>) -> Approval {
 
 #[test]
 fn pairs_and_keeps_the_key_in_the_store() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     // The channel must be on the Launchpad's host (127.0.0.1); the port may differ.
     let lp = FakeLaunchpad::start(Approval {
@@ -60,6 +61,7 @@ fn pairs_and_keeps_the_key_in_the_store() {
 
 #[test]
 fn a_v0_result_gets_its_channel_from_the_launchpad() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let lp = FakeLaunchpad::start(approval(None));
     let (manager, _) = common::open(dir.path(), Setup::default());
@@ -78,6 +80,7 @@ fn a_v0_result_gets_its_channel_from_the_launchpad() {
 
 #[test]
 fn ignores_a_callback_with_another_state() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let lp = FakeLaunchpad::start(approval(None));
     let (manager, _) = common::open(dir.path(), Setup::default());
@@ -106,6 +109,7 @@ fn ignores_a_callback_with_another_state() {
 
 #[test]
 fn reports_a_cancelled_pairing() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let lp = FakeLaunchpad::start(Approval {
         decline: true,
@@ -125,6 +129,7 @@ fn reports_a_cancelled_pairing() {
 
 #[test]
 fn can_be_cancelled() {
+    let _serial = common::serial();
     let dir = tempfile::tempdir().unwrap();
     let (manager, _) = common::open(dir.path(), Setup::default());
     let pending = manager
