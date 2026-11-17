@@ -14,7 +14,7 @@
 
 use crate::app_tools::{AppToolsHandle, LockSeat, Route, Router};
 use crate::history::{Event, History, HistoryEntry};
-use crate::lock::{busy_message, ComputerLock};
+use crate::lock::ComputerLock;
 use crate::mcp_tap::{Tap, TapEvent};
 use crate::platform::hide_console;
 use crate::process_tree::ProcessTree;
@@ -614,12 +614,8 @@ impl Worker {
                             line.push(b'\n');
                             let _ = to_engine.send(line);
                         }
-                        Route::Refuse { id, holder } => {
-                            let answer = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "id": id,
-                                "result": crate::app_tools::text_result(busy_message(&holder), true),
-                            });
+                        Route::Refuse { id, busy } => {
+                            let answer = crate::app_tools::refusal(&id, &busy);
                             let _ = tx.send(Msg::Out(answer.to_string()));
                         }
                         Route::Local {

@@ -3,10 +3,11 @@
 //! The Environment sees one MCP server. `tools/list` answers get the app's
 //! tools appended, `tools/call` of an app tool is answered here and never
 //! reaches the engine, and the `initialize` answer carries the app's version
-//! and system under `_meta["io.lazurio/agent-desktop"]`. Every other line
+//! and system under `_meta["io.lazurio/agent-desktop"]`, with `deviceLock: 1`
+//! when the router takes the device lock before every tool call. Every other line
 //! passes through unchanged.
 
-use crate::lock::{ComputerLock, Holder};
+use crate::lock::{Busy, ComputerLock};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::borrow::Cow;
@@ -16,6 +17,10 @@ use std::sync::{Arc, Mutex};
 
 /// Key of the app's details in the `initialize` result's `_meta`.
 pub const META_KEY: &str = "io.lazurio/agent-desktop";
+/// Field of the app's details announcing that it takes the device lock of
+/// the person's session before every tool call, and its version.
+pub const DEVICE_LOCK_KEY: &str = "deviceLock";
+pub const DEVICE_LOCK_VERSION: u32 = 1;
 
 pub trait AppTools: Send + Sync {
     /// MCP tool definitions: `name`, `description`, `inputSchema`.
@@ -40,10 +45,11 @@ impl std::fmt::Debug for AppToolsHandle {
 /// What to do with a line from the Environment.
 pub(crate) enum Route {
     Engine,
-    /// A tool call refused because another Environment holds the computer.
+    /// A tool call refused because another Environment or another Lazurio
+    /// app holds the computer.
     Refuse {
         id: Value,
-        holder: Holder,
+        busy: Busy,
     },
     /// An app tool call: answer it here.
     Local {
@@ -138,9 +144,9 @@ impl Router {
         }
     }
 
-    /// The computer-wide lock for a tool call; `Err` with the holder when
-    /// another Environment has the computer.
-    fn take_lock(&self, tool: Option<&str>) -> Result<(), Holder> {
+    /// The computer-wide lock for a tool call; `Err` when another Environment
+    /// or another Lazurio app has the computer.
+    fn take_lock(&self, tool: Option<&str>) -> Result<(), Busy> {
         let Some(seat) = &self.seat else {
             return Ok(());
         };
@@ -182,8 +188,8 @@ impl Router {
             "tools/call" => {
                 let params = msg.params;
                 let name = params.as_ref().and_then(|p| p.name.clone());
-                if let Err(holder) = self.take_lock(name.as_deref()) {
-                    return Route::Refuse { id, holder };
+                if let Err(busy) = self.take_lock(name.as_deref()) {
+                    return Route::Refuse { id, busy };
                 }
                 let local = |n: &String| {
                     self.names.contains(n)
@@ -245,15 +251,27 @@ impl Router {
                 }
             }
         } else if let Some(tools) = &self.tools {
+            let mut about = tools.about();
+            // The Environment ends a session that does not announce the device
+            // lock (ADR 0006 point 4); only a router that enforces it does.
+            if let (Some(about), Some(_)) = (about.as_object_mut(), &self.seat) {
+                about.insert(DEVICE_LOCK_KEY.to_string(), json!(DEVICE_LOCK_VERSION));
+            }
             let meta = result.entry("_meta").or_insert_with(|| json!({}));
             if let Some(meta) = meta.as_object_mut() {
-                meta.insert(META_KEY.to_string(), tools.about());
+                meta.insert(META_KEY.to_string(), about);
             }
         }
         let mut out = serde_json::to_vec(&msg).unwrap_or_else(|_| line.to_vec());
         out.push(b'\n');
         Cow::Owned(out)
     }
+}
+
+/// The answer to a `tools/call` that could not start: an MCP tool error the
+/// agent reads, in Czech and English.
+pub(crate) fn refusal(id: &Value, busy: &Busy) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "result": text_result(busy.message(), true) })
 }
 
 /// A `tools/call` result with one text block.
@@ -354,21 +372,84 @@ mod tests {
         assert!(matches!(r.rewrite_engine_line(line), Cow::Borrowed(_)));
     }
 
-    #[test]
-    fn refuses_calls_while_another_environment_holds_the_computer() {
-        let lock = Arc::new(ComputerLock::default());
-        let seat = |id: &str, label: &str| LockSeat {
+    fn scratch_lock(name: &str) -> Arc<ComputerLock> {
+        Arc::new(ComputerLock::with_device_lock(
+            crate::lock::test_guard::scratch(name).join("agent.lock"),
+            crate::lock::HOLD_AFTER_LAST_CALL,
+        ))
+    }
+
+    fn seat(lock: &Arc<ComputerLock>, id: &str, label: &str) -> LockSeat {
+        LockSeat {
             lock: lock.clone(),
             env_id: id.into(),
             label: label.into(),
+        }
+    }
+
+    #[test]
+    fn announces_the_device_lock_in_initialize() {
+        let _forks = crate::lock::test_guard::in_process();
+        let lock = scratch_lock("announce");
+        let r = Router::with_lock(Some(Arc::new(Fake)), seat(&lock, "a", "Prostředí A"));
+        r.route_environment_line(
+            br#"{"jsonrpc":"2.0","id":"b0","method":"initialize","params":{}}"#,
+        );
+        let out = r.rewrite_engine_line(
+            br#"{"jsonrpc":"2.0","id":"b0","result":{"serverInfo":{"name":"agent-desktop"}}}"#,
+        );
+        let v: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["result"]["_meta"][META_KEY]["appVersion"], "9.9.9");
+        assert_eq!(v["result"]["_meta"][META_KEY]["deviceLock"], 1);
+    }
+
+    #[test]
+    fn refuses_calls_while_another_lazurio_app_holds_the_computer() {
+        let _forks = crate::lock::test_guard::in_process();
+        let path = crate::lock::test_guard::scratch("other-app").join("agent.lock");
+        let linger = crate::lock::HOLD_AFTER_LAST_CALL;
+        // Lazurio App takes the same file in its own process.
+        let other_app = ComputerLock::with_device_lock(path.clone(), linger);
+        other_app.try_begin("x", "Prostředí X").unwrap();
+        let lock = Arc::new(ComputerLock::with_device_lock(path, linger));
+        let r = Router::with_lock(Some(Arc::new(Fake)), seat(&lock, "a", "Prostředí A"));
+        let call =
+            br#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"desktop_click"}}"#;
+        let Route::Refuse { id, busy } = r.route_environment_line(call) else {
+            panic!("a call must be refused while another app holds the computer");
         };
-        let a = Router::with_lock(Some(Arc::new(Fake)), seat("a", "Prostředí A"));
-        let b = Router::with_lock(Some(Arc::new(Fake)), seat("b", "Prostředí B"));
+        assert_eq!(busy, Busy::OtherApplication);
+        let answer = refusal(&id, &busy);
+        assert_eq!(answer["id"], 7);
+        assert_eq!(answer["result"]["isError"], true);
+        let text = answer["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("agent z jiné aplikace Lazurio"), "{text}");
+        assert!(text.contains("another Lazurio app"), "{text}");
+        // The status tool still answers, so the agent can see the computer.
+        assert!(matches!(
+            r.route_environment_line(
+                br#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"lazurio_app_status"}}"#
+            ),
+            Route::Local { .. }
+        ));
+        other_app.release("x");
+        assert!(matches!(r.route_environment_line(call), Route::Engine));
+    }
+
+    #[test]
+    fn refuses_calls_while_another_environment_holds_the_computer() {
+        let _forks = crate::lock::test_guard::in_process();
+        let lock = scratch_lock("other-environment");
+        let a = Router::with_lock(Some(Arc::new(Fake)), seat(&lock, "a", "Prostředí A"));
+        let b = Router::with_lock(Some(Arc::new(Fake)), seat(&lock, "b", "Prostředí B"));
         let call =
             br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"desktop_click"}}"#;
         assert!(matches!(a.route_environment_line(call), Route::Engine));
         match b.route_environment_line(call) {
-            Route::Refuse { holder, .. } => assert_eq!(holder.label, "Prostředí A"),
+            Route::Refuse {
+                busy: Busy::Environment(holder),
+                ..
+            } => assert_eq!(holder.label, "Prostředí A"),
             _ => panic!("b must be refused while a works"),
         }
         // The status tool still answers for b, so its agent can see who works.

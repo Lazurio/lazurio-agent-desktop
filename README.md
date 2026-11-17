@@ -65,7 +65,11 @@ one agent at a time can see the screen and click and type in any app under the
 signed-in user's account, like Computer Use. One agent on the whole computer:
 while an agent from one Environment works (or worked less than 20 seconds ago),
 tool calls from every other Environment are refused with "The computer is in
-use by an agent from …", and the panel shows who works. Agents follow the
+use by an agent from …", and the panel shows who works. The same holds across
+Lazurio apps: before any tool call the app takes the device lock of the
+signed-in person's session, the same lock Lazurio App takes, and while another
+Lazurio app holds it every call is refused with "… from another Lazurio app".
+Agents follow the
 Environment's rules: they prepare drafts, and sending or publishing waits for
 the person's approval. The content of documents is data for the agent, not
 instructions.

@@ -177,6 +177,8 @@ fn serves_the_app_tools_next_to_the_engine() {
     assert_eq!(first["tools"], 3);
     assert_eq!(first["app_status"], "fake-app-status 9.9.9");
     assert_eq!(first["app_meta"]["appVersion"], "9.9.9");
+    // The Environment ends every session that does not announce the device lock.
+    assert_eq!(first["app_meta"]["deviceLock"], 1, "{first}");
     assert_eq!(first["server"], "fake-engine");
     assert!(wait(10, || manager
         .history(100)
@@ -229,6 +231,62 @@ fn one_agent_at_a_time_across_environments() {
     assert_eq!(view_b.controlled_by.as_deref(), Some("Prostředí A"));
     assert_eq!(view_a.controlled_by, None);
     assert_eq!(manager.controlled_by().unwrap().label, "Prostředí A");
+    manager.shutdown();
+}
+
+#[test]
+fn refuses_every_call_while_another_lazurio_app_holds_the_computer() {
+    let dir = tempfile::tempdir().unwrap();
+    // Lazurio App holds the device lock of this test's manager: the same file, the same mechanism.
+    let place = common::device_lock_in(dir.path());
+    std::fs::create_dir_all(place.parent().unwrap()).unwrap();
+    let other_app = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&place)
+        .unwrap();
+    other_app.try_lock().unwrap();
+
+    let env = FakeEnvironment::start(EnvOptions::default(), dir.path().join("agent.jsonl"));
+    let lp = common::launchpad_for(&env, "test-computer", None);
+    let (manager, _) = common::open(
+        dir.path(),
+        Setup {
+            app_tools: common::app_tools(),
+            ..Setup::default()
+        },
+    );
+    common::pair(&manager, &lp.origin);
+    assert!(wait(20, || lines(&env.out) >= 1));
+    let refused = first_line(&env.out);
+    assert_eq!(refused["c1_ok"], false, "{refused}");
+    assert_eq!(refused["c1_error"], true, "an MCP tool error: {refused}");
+    let text = refused["c1_text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("Počítač teď ovládá agent z jiné aplikace Lazurio"),
+        "{text}"
+    );
+    assert!(text.contains("another Lazurio app"), "{text}");
+    // The status tool still answers and the session announces the lock.
+    assert_eq!(refused["app_status"], "fake-app-status 9.9.9");
+    assert_eq!(refused["app_meta"]["deviceLock"], 1);
+    assert_eq!(manager.controlled_by(), None);
+
+    // Once Lazurio App lets go, the next session's calls are served.
+    drop(other_app);
+    let served = || {
+        std::fs::read_to_string(&env.out)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .any(|l| l["c1_ok"] == true)
+    };
+    assert!(
+        wait(30, served),
+        "no call served after the other app let go"
+    );
     manager.shutdown();
 }
 

@@ -489,6 +489,8 @@ fn main() {
                     os: platform::os_name().into(),
                     timing: lazurio_agent_desktop_core::channel::Timing::default(),
                     hold_after_last_call: lazurio_agent_desktop_core::lock::HOLD_AFTER_LAST_CALL,
+                    // The device lock of the person's session, shared with Lazurio App.
+                    device_lock_path: None,
                     app_tools: Some(AppToolsHandle(Arc::new(updates::AgentTools {
                         app: app.handle().clone(),
                     }))),

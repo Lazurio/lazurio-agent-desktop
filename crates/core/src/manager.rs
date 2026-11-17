@@ -38,6 +38,10 @@ pub struct ManagerConfig {
     /// How long the computer stays with an Environment after its last tool
     /// call (contract v1: 20 s).
     pub hold_after_last_call: Duration,
+    /// The device lock file shared with Lazurio App (ADR 0006 point 4).
+    /// `None` in the app: the place of the person's session,
+    /// [`crate::lock::device_lock_path`]. Tests give each manager its own file.
+    pub device_lock_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -116,10 +120,13 @@ impl Manager {
         if migrated {
             store.save(&records)?;
         }
-        let lock = Arc::new(ComputerLock::with_linger(cfg.hold_after_last_call));
+        let lock = Arc::new(match &cfg.device_lock_path {
+            Some(path) => ComputerLock::with_device_lock(path.clone(), cfg.hold_after_last_call),
+            None => ComputerLock::with_linger(cfg.hold_after_last_call),
+        });
         let changes = Arc::new(Notifier::spawn(on_change));
         {
-            // The lock changes hands on channel threads: mark only.
+            // The lock changes hands on channel threads and its own: mark only.
             let changes = changes.clone();
             lock.set_listener(Arc::new(move || changes.notify()));
         }

@@ -500,6 +500,7 @@ fn play_agent(ws: &mut WebSocket<TcpStream>, state: &EnvState) {
         "app_status": app_status,
         "c1_ok": c1["result"]["isError"] == false,
         "c1_text": c1["result"]["content"][0]["text"],
+        "c1_error": c1["result"]["isError"] == true,
         "c2_error": c2["result"]["isError"] == true,
     });
     if let Ok(mut f) = std::fs::OpenOptions::new()

@@ -616,7 +616,10 @@ mod tests {
             Arc::new(AtomicBool::new(on)),
             Arc::new(History::new(dir.join("history.jsonl"))),
             "env".into(),
-            Arc::new(ComputerLock::default()),
+            Arc::new(ComputerLock::with_device_lock(
+                dir.join("agent.lock"),
+                crate::lock::HOLD_AFTER_LAST_CALL,
+            )),
             "Env".into(),
         )
     }
@@ -629,6 +632,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn runs_a_command_and_keeps_only_command_and_exit_code() {
+        let _forks = crate::lock::test_guard::spawning();
         let dir = tempfile::tempdir().unwrap();
         let s = shell(dir.path(), true);
         let r = s.call(
@@ -655,6 +659,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ends_a_command_at_its_timeout_with_its_children() {
+        let _forks = crate::lock::test_guard::spawning();
         let dir = tempfile::tempdir().unwrap();
         let s = shell(dir.path(), true);
         let started = Instant::now();
@@ -669,6 +674,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn starts_reads_writes_and_stops_a_long_command() {
+        let _forks = crate::lock::test_guard::spawning();
         let dir = tempfile::tempdir().unwrap();
         let s = shell(dir.path(), true);
         let id = body(&s.call(
@@ -708,6 +714,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn runs_powershell_without_a_uac_prompt() {
+        let _forks = crate::lock::test_guard::spawning();
         let dir = tempfile::tempdir().unwrap();
         let s = shell(dir.path(), true);
         let b = body(&s.call(TOOL_RUN, &json!({"command": "Write-Output hi; exit 4"})));

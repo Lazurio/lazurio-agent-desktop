@@ -100,12 +100,18 @@ pub fn open_with(
             app_tools: setup.app_tools,
             timing: setup.timing,
             hold_after_last_call: setup.hold,
+            device_lock_path: Some(device_lock_in(data_dir)),
         },
         store.clone(),
         on_change,
     )
     .unwrap();
     (manager, store)
+}
+
+/// The device lock file of a test's manager: its own, never the person's.
+pub fn device_lock_in(data_dir: &Path) -> PathBuf {
+    data_dir.join("device").join("agent.lock")
 }
 
 /// A Launchpad that hands out `env`'s channel and registers keys with it.
